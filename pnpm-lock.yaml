@@ -3,6 +3,13 @@ lockfileVersion: '9.0'
 settings:
   autoInstallPeers: false
   excludeLinksFromLockfile: false
+  onlyBuiltDependencies:
+    - '@swc/core'
+    - '@whiskeysockets/baileys'
+    - esbuild
+    - msw
+    - protobufjs
+    - unrs-resolver
 
 catalogs:
   default:
