@@ -1,0 +1,2 @@
+# Allow dist to be committed so Hostinger can deploy without building
+# (dist is excluded by root .gitignore but we override it here)
