@@ -1,22 +1,26 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Support Connect - Live WhatsApp Support Chat App
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: articles
+    description: News articles
+  - name: chat
+    description: Live chat support
+  - name: admin
+    description: Admin operations
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +28,322 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /articles:
+    get:
+      operationId: listArticles
+      tags: [articles]
+      summary: List news articles
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: number
+            default: 20
+      responses:
+        "200":
+          description: List of articles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Article"
+
+  /articles/featured:
+    get:
+      operationId: getFeaturedArticle
+      tags: [articles]
+      summary: Get featured/top story article
+      responses:
+        "200":
+          description: Featured article
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+
+  /articles/trending:
+    get:
+      operationId: listTrendingArticles
+      tags: [articles]
+      summary: List trending articles
+      responses:
+        "200":
+          description: Trending articles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Article"
+
+  /articles/{id}:
+    get:
+      operationId: getArticle
+      tags: [articles]
+      summary: Get article by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: number
+      responses:
+        "200":
+          description: Article
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+
+  /articles/breaking:
+    get:
+      operationId: getBreakingNews
+      tags: [articles]
+      summary: Get breaking news ticker text
+      responses:
+        "200":
+          description: Breaking news
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BreakingNews"
+
+  /chat/sessions:
+    post:
+      operationId: createChatSession
+      tags: [chat]
+      summary: Start a new chat session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatSessionInput"
+      responses:
+        "201":
+          description: Created session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+
+  /chat/sessions/{sessionId}/messages:
+    get:
+      operationId: listChatMessages
+      tags: [chat]
+      summary: Get messages for a session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+    post:
+      operationId: sendChatMessage
+      tags: [chat]
+      summary: Send a message
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatMessageInput"
+      responses:
+        "201":
+          description: Sent message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatMessage"
+
+  /admin/login:
+    post:
+      operationId: adminLogin
+      tags: [admin]
+      summary: Admin login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginInput"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLoginResult"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/logout:
+    post:
+      operationId: adminLogout
+      tags: [admin]
+      summary: Admin logout
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /admin/me:
+    get:
+      operationId: getAdminMe
+      tags: [admin]
+      summary: Get current admin info
+      responses:
+        "200":
+          description: Admin info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/sessions:
+    get:
+      operationId: listAdminSessions
+      tags: [admin]
+      summary: List all chat sessions for admin
+      responses:
+        "200":
+          description: All sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatSession"
+
+  /admin/sessions/{sessionId}:
+    delete:
+      operationId: deleteAdminSession
+      tags: [admin]
+      summary: Delete a chat session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /admin/sessions/{sessionId}/close:
+    post:
+      operationId: closeAdminSession
+      tags: [admin]
+      summary: Close a chat session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Closed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+
+  /admin/sessions/{sessionId}/messages:
+    get:
+      operationId: listAdminSessionMessages
+      tags: [admin]
+      summary: Get messages for a session (admin)
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+    post:
+      operationId: sendAdminMessage
+      tags: [admin]
+      summary: Send admin reply to a session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatMessageInput"
+      responses:
+        "201":
+          description: Sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatMessage"
+
+  /admin/stats:
+    get:
+      operationId: getAdminStats
+      tags: [admin]
+      summary: Get dashboard stats
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminStats"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +351,108 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    Article:
+      type: object
+      properties:
+        id:          { type: number }
+        title:       { type: string }
+        summary:     { type: string }
+        content:     { type: ["string", "null"] }
+        category:    { type: string }
+        imageUrl:    { type: ["string", "null"] }
+        publishedAt: { type: string }
+        isFeatured:  { type: boolean }
+        isTrending:  { type: boolean }
+        viewCount:   { type: number }
+      required: [id, title, summary, category, publishedAt, isFeatured, isTrending, viewCount]
+
+    BreakingNews:
+      type: object
+      properties:
+        text: { type: string }
+      required: [text]
+
+    ChatSession:
+      type: object
+      properties:
+        id:          { type: string }
+        userName:    { type: string }
+        userPhone:   { type: ["string", "null"] }
+        status:      { type: string }
+        createdAt:   { type: string }
+        updatedAt:   { type: string }
+        lastMessage: { type: ["string", "null"] }
+        unreadCount: { type: number }
+      required: [id, userName, status, createdAt, updatedAt, unreadCount]
+
+    ChatSessionInput:
+      type: object
+      properties:
+        userName:  { type: string }
+        userPhone: { type: string }
+      required: [userName]
+
+    ChatMessage:
+      type: object
+      properties:
+        id:        { type: number }
+        sessionId: { type: string }
+        content:   { type: string }
+        sender:    { type: string }
+        createdAt: { type: string }
+        isRead:    { type: boolean }
+      required: [id, sessionId, content, sender, createdAt, isRead]
+
+    ChatMessageInput:
+      type: object
+      properties:
+        content: { type: string }
+      required: [content]
+
+    AdminLoginInput:
+      type: object
+      properties:
+        username: { type: string }
+        password: { type: string }
+      required: [username, password]
+
+    AdminLoginResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        token:   { type: string }
+        admin:
+          $ref: "#/components/schemas/AdminUser"
+      required: [success, token, admin]
+
+    AdminUser:
+      type: object
+      properties:
+        id:       { type: number }
+        username: { type: string }
+      required: [id, username]
+
+    AdminStats:
+      type: object
+      properties:
+        totalSessions:  { type: number }
+        openSessions:   { type: number }
+        closedSessions: { type: number }
+        totalMessages:  { type: number }
+        todaySessions:  { type: number }
+      required: [totalSessions, openSessions, closedSessions, totalMessages, todaySessions]
+
+    SuccessResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+      required: [success]
+
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]

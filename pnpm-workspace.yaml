@@ -70,8 +70,10 @@ autoInstallPeers: false
 
 onlyBuiltDependencies:
   - '@swc/core'
+  - '@whiskeysockets/baileys'
   - esbuild
   - msw
+  - protobufjs
   - unrs-resolver
 
 overrides:

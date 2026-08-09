@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Support Connect"
+description = "WhatsApp bot management panel — user panel to manage WhatsApp bot (chats, calls, status, connect, settings, tools, backup, logs) and admin dashboard to manage users and system."
+version = "1.0.0"
+id = "artifacts/support-connect"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22057
+
+[services.development]
+run = "pnpm --filter @workspace/support-connect run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/support-connect", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/support-connect/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22057"
+BASE_PATH = "/"
