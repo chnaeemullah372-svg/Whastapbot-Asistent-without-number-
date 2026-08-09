@@ -9,16 +9,6 @@
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
   "private": true,
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@swc/core",
-      "@whiskeysockets/baileys",
-      "esbuild",
-      "msw",
-      "protobufjs",
-      "unrs-resolver"
-    ]
-  },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.1"
   },
