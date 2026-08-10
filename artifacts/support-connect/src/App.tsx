@@ -6,6 +6,7 @@ import NotFound from "@/pages/not-found";
 
 import PanelLogin from "@/pages/panel/login";
 import Chats from "@/pages/panel/chats";
+import Groups from "@/pages/panel/groups";
 import Connect from "@/pages/panel/connect";
 import SettingsPage from "@/pages/panel/settings";
 import Certificate from "@/pages/panel/certificate";
@@ -39,6 +40,7 @@ function Router() {
       <Route path="/help" component={Help} />
       <Route path="/calls" component={Calls} />
       <Route path="/status" component={Status} />
+      <Route path="/groups" component={Groups} />
       <Route path="/" component={Chats} />
 
       <Route component={NotFound} />

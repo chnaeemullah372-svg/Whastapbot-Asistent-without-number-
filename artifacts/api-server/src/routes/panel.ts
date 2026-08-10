@@ -299,17 +299,20 @@ router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
   res.json({ success: true });
 });
 
-/** Send a message to a phone number (creates the chat if new). */
+/** Send a message to a phone number OR a group JID (creates the chat if new). */
 router.post("/panel/send", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
+  const jid   = String(req.body?.jid  ?? "").trim();          // full JID for groups
   const phone = String(req.body?.phone ?? "").replace(/\D/g, "");
-  const text = String(req.body?.text ?? "").trim();
-  if (!phone || !text) {
-    res.status(400).json({ error: "phone and text required" });
+  const text  = String(req.body?.text  ?? "").trim();
+  if ((!phone && !jid) || !text) {
+    res.status(400).json({ error: "phone (or jid) and text required" });
     return;
   }
   try {
-    const waMessageId = await multiWA.sendMessage(PANEL_USER_ID, phone, text);
+    const waMessageId = jid
+      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text)
+      : await multiWA.sendMessage(PANEL_USER_ID, phone, text);
     res.json({ success: true, waMessageId });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to send" });

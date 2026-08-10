@@ -4,7 +4,7 @@ import { panel, panelAuth } from "@/lib/panelApi";
 import {
   Menu, X, LayoutDashboard, QrCode, Settings, Wrench, ShieldCheck,
   DatabaseBackup, ScrollText, LogOut, MessageCircle, ChevronLeft, HelpCircle,
-  Phone, CircleDashed,
+  Phone, CircleDashed, Users2,
 } from "lucide-react";
 
 interface MenuItem {
@@ -14,7 +14,8 @@ interface MenuItem {
 }
 
 const ITEMS: MenuItem[] = [
-  { label: "Dashboard", icon: LayoutDashboard, path: "/" },
+  { label: "Chats", icon: LayoutDashboard, path: "/" },
+  { label: "Groups", icon: Users2, path: "/groups" },
   { label: "Calls", icon: Phone, path: "/calls" },
   { label: "Status", icon: CircleDashed, path: "/status" },
   { label: "WhatsApp Connect", icon: QrCode, path: "/connect" },
