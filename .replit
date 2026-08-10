@@ -25,3 +25,4 @@ timeoutMs = 20000
 ADMIN_USERNAME = "admin"
 "Hostinger Username" = "chnaeemullah372@gmail.com"
 "Hostinger paswerd" = "chnaeemullah372@gmail.com"
+LOG_LEVEL = "info"
