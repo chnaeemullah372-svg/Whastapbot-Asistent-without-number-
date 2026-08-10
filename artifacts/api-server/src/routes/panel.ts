@@ -191,7 +191,12 @@ router.get("/panel/wa/certificate", async (req, res): Promise<void> => {
 
 router.get("/panel/chats", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
-  res.json(await getAllChats());
+  // Only return chats for the currently connected WhatsApp number.
+  // This prevents old-number chats from leaking into the panel when a new
+  // number connects: each number's chat history is isolated by accountPhone.
+  const info = multiWA.getSessionInfo(PANEL_USER_ID);
+  const accountPhone = info?.phoneNumber ?? null;
+  res.json(await getAllChats(accountPhone ?? undefined));
 });
 
 /**

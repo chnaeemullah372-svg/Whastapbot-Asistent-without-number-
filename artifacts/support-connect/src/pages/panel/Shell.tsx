@@ -2,22 +2,19 @@ import { useState, useEffect, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { panel, panelAuth } from "@/lib/panelApi";
 import {
-  Menu, X, LayoutDashboard, QrCode, Settings, Wrench, ShieldCheck,
+  Menu, X, QrCode, Settings, Wrench, ShieldCheck,
   DatabaseBackup, ScrollText, LogOut, MessageCircle, ChevronLeft, HelpCircle,
-  Phone, CircleDashed, Users2,
+  Users2, MessageSquare, Phone, CircleDashed,
 } from "lucide-react";
 
 interface MenuItem {
   label: string;
-  icon: typeof LayoutDashboard;
+  icon: typeof MessageSquare;
   path: string;
 }
 
-const ITEMS: MenuItem[] = [
-  { label: "Chats", icon: LayoutDashboard, path: "/" },
-  { label: "Groups", icon: Users2, path: "/groups" },
-  { label: "Calls", icon: Phone, path: "/calls" },
-  { label: "Status", icon: CircleDashed, path: "/status" },
+// Sidebar: only admin/utility items
+const SIDEBAR_ITEMS: MenuItem[] = [
   { label: "WhatsApp Connect", icon: QrCode, path: "/connect" },
   { label: "Settings", icon: Settings, path: "/settings" },
   { label: "Auto Fix / Tools", icon: Wrench, path: "/tools" },
@@ -25,6 +22,14 @@ const ITEMS: MenuItem[] = [
   { label: "Backup & Restore", icon: DatabaseBackup, path: "/backup" },
   { label: "Logs", icon: ScrollText, path: "/logs" },
   { label: "Help & Support", icon: HelpCircle, path: "/help" },
+];
+
+// Bottom tab bar: WhatsApp-style main navigation
+const TABS: MenuItem[] = [
+  { label: "Chats", icon: MessageSquare, path: "/" },
+  { label: "Groups", icon: Users2, path: "/groups" },
+  { label: "Status", icon: CircleDashed, path: "/status" },
+  { label: "Calls", icon: Phone, path: "/calls" },
 ];
 
 export function useRequirePanelAuth() {
@@ -38,14 +43,10 @@ export function useRequirePanelAuth() {
     panel.get("/panel/me")
       .then((r) => setUser({ username: r.username }))
       .catch((err: any) => {
-        // Only force a logout if the token is genuinely rejected (401/403).
-        // Transient failures (server restarting, network blip) must NOT log the
-        // user out — the session stays valid as long as the token is accepted.
         if (err?.status === 401 || err?.status === 403) {
           panelAuth.clear();
           navigate("/login");
         } else {
-          // Keep the session; show the panel optimistically and let polling recover.
           setUser({ username: "" });
         }
       });
@@ -58,13 +59,15 @@ export default function Shell({
   children,
   back,
   hideHeader,
+  hideBottomTabs,
 }: {
   title: string;
   children: ReactNode;
   back?: boolean;
   hideHeader?: boolean;
+  hideBottomTabs?: boolean;
 }) {
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const [open, setOpen] = useState(false);
   const [username, setUsername] = useState("");
 
@@ -94,12 +97,41 @@ export default function Shell({
         </header>
       )}
 
-      <main className="flex-1 min-h-0 flex flex-col">{children}</main>
+      <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
+        {children}
+      </main>
+
+      {/* Bottom tab bar — WhatsApp style */}
+      {!hideBottomTabs && (
+        <nav className="shrink-0 flex items-center bg-wa-header border-t border-white/10 z-10">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            const active = location === tab.path;
+            return (
+              <button
+                key={tab.path}
+                onClick={() => navigate(tab.path)}
+                className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5 transition ${
+                  active ? "text-white" : "text-white/50 hover:text-white/80"
+                }`}
+              >
+                <Icon className={`w-5 h-5 ${active ? "stroke-[2.5]" : ""}`} />
+                <span className={`text-[10px] font-medium ${active ? "text-white" : "text-white/50"}`}>
+                  {tab.label}
+                </span>
+                {active && (
+                  <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-white rounded-t-full" />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+      )}
 
       {/* Drawer overlay */}
       {open && <div className="fixed inset-0 bg-black/50 z-20" onClick={() => setOpen(false)} />}
 
-      {/* Drawer */}
+      {/* Sidebar drawer — only utility items */}
       <aside
         className={`fixed top-0 left-0 h-full w-[82%] max-w-xs bg-sidebar z-30 transform transition-transform duration-300 ease-out flex flex-col ${
           open ? "translate-x-0" : "-translate-x-full"
@@ -119,7 +151,7 @@ export default function Shell({
         </div>
 
         <nav className="flex-1 overflow-y-auto py-2 wa-scroll">
-          {ITEMS.map((item) => {
+          {SIDEBAR_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
               <button

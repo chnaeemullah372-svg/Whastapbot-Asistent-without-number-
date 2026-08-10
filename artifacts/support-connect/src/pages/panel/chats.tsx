@@ -143,10 +143,11 @@ export default function Chats() {
     return () => window.removeEventListener("popstate", onPop);
   }, [activeJid, loadChats]);
 
-  // Individual chats only — groups are shown in /groups
+  // Individual chats only — exclude groups (@g.us) and status broadcasts
   const filtered = chats.filter(
     (c) =>
       !c.jid.endsWith("@g.us") &&
+      c.jid !== "status@broadcast" &&
       (c.name || "").toLowerCase().includes(search.toLowerCase()),
   );
 
