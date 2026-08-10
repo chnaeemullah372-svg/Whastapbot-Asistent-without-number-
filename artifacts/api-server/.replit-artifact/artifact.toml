@@ -21,12 +21,14 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# we don't run through pnpm to make startup faster in production
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+# Shell wrapper sets ulimit -n (file descriptors) before starting node
+# This prevents EMFILE errors caused by WhatsApp WebSocket + DB connections
+args = ["sh", "artifacts/api-server/start.sh"]
 
 [services.production.run.env]
 PORT = "8080"
 NODE_ENV = "production"
+UV_THREADPOOL_SIZE = "32"
 
 [services.production.health.startup]
 path = "/api/healthz"
