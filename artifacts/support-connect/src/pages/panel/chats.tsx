@@ -145,8 +145,7 @@ export default function Chats() {
 
   const filtered = chats.filter(
     (c) =>
-      (c.name || "").toLowerCase().includes(search.toLowerCase()) ||
-      c.phone.includes(search),
+      (c.name || "").toLowerCase().includes(search.toLowerCase()),
   );
 
   if (activeJid) {
@@ -212,11 +211,11 @@ export default function Chats() {
                 className="w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition text-left border-b border-border/40"
               >
                 <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-lg shrink-0">
-                  {(c.name || c.phone).charAt(c.name ? 0 : 1).toUpperCase()}
+                  {c.name ? c.name.charAt(0).toUpperCase() : "?"}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{c.name || c.phone}</span>
+                    <span className="font-medium truncate">{c.name || "••••••"}</span>
                     <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
                       {fmtTime(c.lastMsgTs)}
                     </span>
@@ -330,7 +329,7 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const phone = phoneFromJid(jid);
-  const title = chat?.name || phone;
+  const title = chat?.name || "••••••";
 
   const load = useCallback(() => {
     panel.get(`/panel/chats/${encodeURIComponent(jid)}/messages`)
@@ -403,11 +402,10 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
           <ChevronLeft className="w-6 h-6" />
         </button>
         <div className="w-9 h-9 rounded-full bg-white/15 flex items-center justify-center font-semibold shrink-0">
-          {title.charAt(chat?.name ? 0 : 1).toUpperCase()}
+          {chat?.name ? chat.name.charAt(0).toUpperCase() : "?"}
         </div>
         <div className="flex-1 min-w-0">
           <p className="font-semibold leading-tight truncate">{title}</p>
-          <p className="text-xs text-white/70 truncate">{phone}</p>
         </div>
         <MoreVertical className="w-5 h-5" />
       </header>

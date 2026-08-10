@@ -59,8 +59,8 @@ export default function Status() {
                 Recent updates
               </p>
               {groups.map((g) => {
-                const label = g.name || (g.phone ? `+${g.phone}` : "Unknown");
-                const initial = (g.name ? label.charAt(0) : (g.phone.charAt(0) || "?")).toUpperCase();
+                const label = g.name || "••••••";
+                const initial = g.name ? g.name.charAt(0).toUpperCase() : "?";
                 return (
                   <button
                     key={g.participant}
@@ -101,8 +101,8 @@ function StatusViewer({ group, onClose }: { group: StatusGroup; onClose: () => v
   }, [items.length, onClose]);
 
   if (!item) return null;
-  const label = group.name || (group.phone ? `+${group.phone}` : "Unknown");
-  const initial = (group.name ? label.charAt(0) : (group.phone.charAt(0) || "?")).toUpperCase();
+  const label = group.name || "••••••";
+  const initial = group.name ? group.name.charAt(0).toUpperCase() : "?";
   const url = panel.mediaUrl(item.waMessageId);
   const next = () => (idx < items.length - 1 ? setIdx(idx + 1) : onClose());
   const prev = () => idx > 0 && setIdx(idx - 1);
