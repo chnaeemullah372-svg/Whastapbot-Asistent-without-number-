@@ -110,7 +110,65 @@ audit output; the summary and backlog below is what matters for planning.
 - #12/#13 view-once/ephemeral — **this is a product/policy decision, not a code gap**: today the app *deliberately* defeats both (permanently saves view-once media, ignores disappearing timers) as part of its anti-delete/monitoring design. Whether that stays, changes, or just gets labeled honestly in the UI needs an explicit owner decision before any code changes here.
 - #16 true multi-account (more than one simultaneous Baileys session, an account switcher UI, decoupling `PANEL_USER_ID` from a single hardcoded session)
 
-Status: **awaiting owner prioritization** on which of the above to build next — this is a large enough backlog that building all of it blindly isn't practical in one pass, and #12/#13 specifically need a decision before touching any code.
+Status: ~~awaiting owner prioritization~~ — owner said build all of it, top to bottom, and label view-once/disappearing content clearly in the UI rather than changing the underlying anti-delete behavior. See Round 3.
+
+## Round 3 — building the rest of the WhatsApp Web feature set
+
+Everything in the backlog above is now implemented, except true multi-account
+(explicitly held back — see below).
+
+| # | Feature | Status |
+|---|---|---|
+| 1 | Message reactions | ✅ done — emoji react/unreact, live via SSE, shown as pills under the bubble |
+| 2 | Message editing | ✅ done — applied in place (protocolMessage MESSAGE_EDIT), "edited" label |
+| 3 | Delete for me vs everyone | ✅ done — separate "Delete for me" (local hide) and "Delete for everyone" (revoke) |
+| 4 | Forward a message | ✅ done — chat picker, re-sends the stored text/media |
+| 5 | Starred messages | ✅ done — star/unstar + a dedicated Starred Messages screen (Settings → Starred Messages) |
+| 6 | Pin / mute / archive chat | ✅ done — chat-list menu, pinned-first sort, Archived section |
+| 7 | Typing indicator + presence | ✅ done for 1:1 chats (typing…/recording/online/last seen, both directions). Group per-participant typing not built (see Known gaps). |
+| 8 | @mentions in groups | ✅ done for receiving (renders `@Name`); composing with an `@` autocomplete was not built (see Known gaps) |
+| 9 | Link previews | ✅ done — thumbnail/title/description card in the bubble |
+| 10 | Group management | ✅ done — Group Info screen: participants, promote/demote/remove, edit subject/description, invite link get/reset, leave |
+| 11 | Real profile photos | ✅ done — fetched/cached from WhatsApp, shown everywhere an avatar renders |
+| 12 | View-once media | ✅ labeled — content is still saved (monitoring design, kept as-is per owner's choice), now shows a clear "View once" badge instead of silently looking like a normal photo |
+| 13 | Disappearing messages | ✅ labeled — same as above, shows a "Disappearing" badge |
+| 14 | In-chat search | ✅ done — search icon in the conversation header, filters the open chat |
+| 15 | Outgoing media | ✅ done — attachment button sends photo/video/voice-note/document via a new upload endpoint |
+| 16 | Multi-account (2+ numbers at once) | ❌ **not built — see below** |
+| 17 | Avatar consistency | ✅ done (same as #11) |
+| 18 | Read-receipt-off awareness | ✅ done — a tick stuck at double-grey for 24h+ gets a tooltip hinting read receipts may be off |
+| 19 | Send-path robustness | ✅ done — `onWhatsApp()` pre-check before messaging a brand-new number, with a clear error instead of a silent failure |
+
+### Why multi-account (#16) was not built
+
+This app's entire auth model is one admin login mapped to one hardcoded
+WhatsApp session (`PANEL_USER_ID = 1`, called out explicitly in
+`chatPersistence.ts`: "The whole app is built around ONE panel user").
+Running two or more WhatsApp numbers connected *at the same time* means
+deciding: does the admin log into separate accounts per number, or does one
+login control several simultaneous sessions with a switcher? Either answer
+changes the login/session model this app is built on today, on a branch that
+auto-deploys straight to production. That's a product decision, not a code
+gap — implementing a guess here risks breaking the single-account panel
+that's currently working. **Needs an explicit decision from the owner
+before any code changes.** Everything else in the original 19-item audit is
+built.
+
+### Known small gaps (not blocking, worth a mention)
+
+- **Group typing indicator**: presence/typing is wired for 1:1 chats only.
+  WhatsApp shows per-participant "X is typing…" in groups, which needs
+  mapping each participant jid to a name and handling multiple simultaneous
+  typers — a smaller follow-up if wanted.
+- **Composing an @mention**: incoming mentions render as `@Name` correctly,
+  but there's no `@`-triggered autocomplete when typing a new group message
+  (you can still type a number and WhatsApp will resolve it as a mention on
+  the receiving end once sent, but there's no in-app assist for it).
+- **Live verification**: none of this has been exercised against a real
+  linked WhatsApp account — that requires scanning a QR/pairing code on an
+  actual phone, which isn't possible from this sandboxed session. Please
+  check the panel after each deploy and report anything that doesn't behave
+  like real WhatsApp Web; the fix loop from here is fast.
 
 ## 1. Reported problem (as described by the owner, in Urdu)
 
