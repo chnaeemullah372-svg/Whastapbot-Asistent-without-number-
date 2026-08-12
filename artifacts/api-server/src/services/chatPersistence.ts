@@ -1,9 +1,10 @@
-import { eq, sql, desc, asc, count } from "drizzle-orm";
+import { eq, sql, desc, asc, count, and, inArray } from "drizzle-orm";
 import { createHash } from "crypto";
 import {
   db,
   waChatsTable,
   waMessagesTable,
+  waMessageReactionsTable,
   waCallLogsTable,
   waAccountsTable,
   appLogsTable,
@@ -39,7 +40,9 @@ export async function logEvent(message: string, level = "info", source = "system
  *  When `history` is true the message came from a WhatsApp history sync, so we
  *  never bump the unread counter (those messages are old) and only advance the
  *  chat's last-message preview when this message is actually newer. */
-async function persistMessage(jid: string, phone: string, msg: WAChatMsg, history = false, name?: string) {
+async function persistMessage(
+  jid: string, phone: string, msg: WAChatMsg, history = false, name?: string, avatarUrl?: string,
+) {
   try {
     // The WhatsApp number that is currently linked — every chat we capture is
     // tagged with it so the admin can browse each connected number separately.
@@ -64,13 +67,21 @@ async function persistMessage(jid: string, phone: string, msg: WAChatMsg, histor
         mediaKind: msg.mediaKind,
         fileName: msg.fileName,
         participant: msg.participant ?? null,
+        edited: msg.edited ?? false,
+        viewOnce: msg.viewOnce ?? false,
+        ephemeral: msg.ephemeral ?? false,
+        linkPreviewUrl: msg.linkPreviewUrl ?? null,
+        linkPreviewTitle: msg.linkPreviewTitle ?? null,
+        linkPreviewDescription: msg.linkPreviewDescription ?? null,
+        linkPreviewThumb: msg.linkPreviewThumb ?? null,
       })
       .onConflictDoUpdate({
         target: waMessagesTable.waMessageId,
         // ANTI-DELETE: once a message is flagged deleted we KEEP the original
         // text + media (don't overwrite). Otherwise refresh the text (e.g. an
-        // old row saved as "Media" before the envelope-unwrap fix) and backfill
-        // media when a re-seen row finally downloaded its payload.
+        // old row saved as "Media" before the envelope-unwrap fix, or an
+        // edited message replacing its own text) and backfill media when a
+        // re-seen row finally downloaded its payload.
         set: {
           text: sql`CASE WHEN ${waMessagesTable.deleted} OR ${isDeleted} THEN ${waMessagesTable.text} ELSE ${msg.text} END`,
           deleted: sql`${waMessagesTable.deleted} OR ${isDeleted}`,
@@ -82,6 +93,9 @@ async function persistMessage(jid: string, phone: string, msg: WAChatMsg, histor
           mediaKind: sql`COALESCE(${waMessagesTable.mediaKind}, ${msg.mediaKind ?? null})`,
           fileName: sql`COALESCE(${waMessagesTable.fileName}, ${msg.fileName ?? null})`,
           participant: sql`COALESCE(${waMessagesTable.participant}, ${msg.participant ?? null})`,
+          // Never flips back to false once an edit is seen, even across
+          // multiple edits of the same message.
+          edited: sql`${waMessagesTable.edited} OR ${msg.edited ?? false}`,
         },
       });
 
@@ -91,6 +105,7 @@ async function persistMessage(jid: string, phone: string, msg: WAChatMsg, histor
         jid,
         phone,
         name: name ?? null,
+        avatarUrl: avatarUrl ?? null,
         lastMsg: msg.text,
         lastMsgTs: msg.ts,
         unread: 0,
@@ -110,6 +125,7 @@ async function persistMessage(jid: string, phone: string, msg: WAChatMsg, histor
           // one behind via COALESCE, or a corrected/renamed contact would never
           // update in the database.
           name: name != null ? name : sql`${waChatsTable.name}`,
+          avatarUrl: avatarUrl != null ? avatarUrl : sql`${waChatsTable.avatarUrl}`,
           // Keep the first owning account; only fill it in if it was unknown.
           accountPhone: sql`COALESCE(${waChatsTable.accountPhone}, ${accountPhone})`,
           unread:
@@ -197,6 +213,97 @@ export async function markDeleted(waMessageId: string) {
   }
 }
 
+/** "Delete for me": a purely local hide, never touches WhatsApp or the other
+ *  party's copy — just removes the row from what this panel shows going
+ *  forward. Distinct from markDeleted (delete-for-everyone / revoke). */
+export async function hideForMe(waMessageId: string) {
+  try {
+    await db.update(waMessagesTable).set({ hiddenForMe: true }).where(eq(waMessagesTable.waMessageId, waMessageId));
+  } catch (err) {
+    console.error("[persist] failed to hide message:", err);
+  }
+}
+
+export async function setStarred(waMessageId: string, starred: boolean) {
+  try {
+    await db.update(waMessagesTable).set({ starred }).where(eq(waMessagesTable.waMessageId, waMessageId));
+  } catch (err) {
+    console.error("[persist] failed to star message:", err);
+  }
+}
+
+/** All starred messages across every chat, newest first, for a Starred
+ *  Messages screen. */
+export async function getStarredMessages() {
+  return db
+    .select()
+    .from(waMessagesTable)
+    .where(and(eq(waMessagesTable.starred, true), eq(waMessagesTable.hiddenForMe, false)))
+    .orderBy(desc(waMessagesTable.ts));
+}
+
+/** A single message's full content (text + media), for re-sending as a
+ *  forward to a different chat. */
+export async function getMessageForForward(waMessageId: string) {
+  const [row] = await db
+    .select({
+      text: waMessagesTable.text,
+      media: waMessagesTable.media,
+      mediaMime: waMessagesTable.mediaMime,
+      mediaKind: waMessagesTable.mediaKind,
+      fileName: waMessagesTable.fileName,
+    })
+    .from(waMessagesTable)
+    .where(eq(waMessagesTable.waMessageId, waMessageId))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function setChatPinned(jid: string, pinned: boolean) {
+  try {
+    await db.update(waChatsTable).set({ pinned }).where(eq(waChatsTable.jid, jid));
+  } catch (err) {
+    console.error("[persist] failed to set pinned:", err);
+  }
+}
+
+export async function setChatMuted(jid: string, muted: boolean) {
+  try {
+    await db.update(waChatsTable).set({ muted }).where(eq(waChatsTable.jid, jid));
+  } catch (err) {
+    console.error("[persist] failed to set muted:", err);
+  }
+}
+
+export async function setChatArchived(jid: string, archived: boolean) {
+  try {
+    await db.update(waChatsTable).set({ archived }).where(eq(waChatsTable.jid, jid));
+  } catch (err) {
+    console.error("[persist] failed to set archived:", err);
+  }
+}
+
+/** Add/update or (with an empty emoji) remove a reactor's reaction on a message. */
+export async function saveReaction(waMessageId: string, reactorJid: string, emoji: string, ts: number) {
+  try {
+    if (!emoji) {
+      await db
+        .delete(waMessageReactionsTable)
+        .where(and(eq(waMessageReactionsTable.waMessageId, waMessageId), eq(waMessageReactionsTable.reactorJid, reactorJid)));
+      return;
+    }
+    await db
+      .insert(waMessageReactionsTable)
+      .values({ waMessageId, reactorJid, emoji, ts })
+      .onConflictDoUpdate({
+        target: [waMessageReactionsTable.waMessageId, waMessageReactionsTable.reactorJid],
+        set: { emoji, ts },
+      });
+  } catch (err) {
+    console.error("[persist] failed to save reaction:", err);
+  }
+}
+
 /** Read full chat history from DB shaped for the engine's hydrate(). */
 export async function loadHistory(): Promise<HydrateChat[]> {
   const chats = await db
@@ -270,11 +377,42 @@ export async function getChatMessagesDb(jid: string) {
       mediaKind: waMessagesTable.mediaKind,
       fileName: waMessagesTable.fileName,
       hasMedia: sql<boolean>`(${waMessagesTable.media} IS NOT NULL)`,
+      starred: waMessagesTable.starred,
+      edited: waMessagesTable.edited,
+      viewOnce: waMessagesTable.viewOnce,
+      ephemeral: waMessagesTable.ephemeral,
+      linkPreviewUrl: waMessagesTable.linkPreviewUrl,
+      linkPreviewTitle: waMessagesTable.linkPreviewTitle,
+      linkPreviewDescription: waMessagesTable.linkPreviewDescription,
+      linkPreviewThumb: waMessagesTable.linkPreviewThumb,
     })
     .from(waMessagesTable)
-    .where(eq(waMessagesTable.jid, jid))
+    // "Delete for me" is a local-only hide — excluded from the list entirely.
+    .where(and(eq(waMessagesTable.jid, jid), eq(waMessagesTable.hiddenForMe, false)))
     .orderBy(asc(waMessagesTable.ts));
-  return rows;
+
+  const ids = rows.map((r: any) => r.waMessageId);
+  const reactionRows = ids.length
+    ? await db.select().from(waMessageReactionsTable).where(inArray(waMessageReactionsTable.waMessageId, ids))
+    : [];
+  const myPhone = (multiWA.getSessionInfo(PANEL_USER_ID)?.phoneNumber ?? "").replace(/\D/g, "");
+  const reactionsByMsg = new Map<string, Map<string, { count: number; byMe: boolean }>>();
+  for (const r of reactionRows) {
+    if (!r.emoji) continue;
+    const reactorPhone = r.reactorJid.split("@")[0].split(":")[0];
+    let m = reactionsByMsg.get(r.waMessageId);
+    if (!m) { m = new Map(); reactionsByMsg.set(r.waMessageId, m); }
+    const cur = m.get(r.emoji) ?? { count: 0, byMe: false };
+    cur.count++;
+    if (myPhone && reactorPhone === myPhone) cur.byMe = true;
+    m.set(r.emoji, cur);
+  }
+  return rows.map((r: any) => ({
+    ...r,
+    reactions: [...(reactionsByMsg.get(r.waMessageId)?.entries() ?? [])].map(([emoji, v]) => ({
+      emoji, count: v.count, byMe: v.byMe,
+    })),
+  }));
 }
 
 /** Fetch a single message's media payload (base64) for the serve endpoint. */
@@ -448,8 +586,8 @@ export async function startPersistence() {
 
   await seedDefaultAdmin();
 
-  multiWA.addPersistListener((_uid, jid, phone, msg, history, name) => {
-    void persistMessage(jid, phone, msg, history, name);
+  multiWA.addPersistListener((_uid, jid, phone, msg, history, name, avatarUrl) => {
+    void persistMessage(jid, phone, msg, history, name, avatarUrl);
   });
   multiWA.addStatusListener((_uid, update) => {
     void persistStatus(update.waMessageId, update.status);
@@ -458,6 +596,10 @@ export async function startPersistence() {
   // in the DB but keep the original content for monitoring.
   multiWA.addDeleteListener((_uid, waMessageId) => {
     void markDeleted(waMessageId);
+  });
+  // Emoji reactions (add or, with an empty emoji, remove).
+  multiWA.addReactionListener((_uid, _jid, waMessageId, reactorJid, emoji, ts) => {
+    void saveReaction(waMessageId, reactorJid, emoji, ts);
   });
   // Calls log: persist every call notification (incoming / missed / rejected).
   multiWA.addCallListener((_uid, call) => {

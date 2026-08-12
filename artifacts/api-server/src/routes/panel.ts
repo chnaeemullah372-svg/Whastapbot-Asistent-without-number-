@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import multer from "multer";
 import { eq, desc } from "drizzle-orm";
 import {
   db,
@@ -10,20 +11,32 @@ import {
   waMessagesTable,
 } from "@workspace/db";
 import { createHash, createHmac } from "crypto";
-import { multiWA } from "../services/multiWhatsapp.js";
+import { multiWA, MEDIA_MAX_BYTES } from "../services/multiWhatsapp.js";
 import {
   PANEL_USER_ID,
   getAllChats,
   getChatMessagesDb,
   getMediaById,
+  getMessageForForward,
   getCallLogs,
   getStatusGroups,
+  getStarredMessages,
   clearUnread,
   markDeleted,
+  hideForMe,
+  setStarred,
+  setChatPinned,
+  setChatMuted,
+  setChatArchived,
   logEvent,
 } from "../services/chatPersistence.js";
 
 const router: IRouter = Router();
+
+/** In-memory upload (no temp file) for media the admin sends OUT — the buffer
+ *  goes straight to Baileys and, capped, into the DB as base64, exactly like
+ *  a downloaded incoming attachment. */
+const uploadMedia = multer({ storage: multer.memoryStorage(), limits: { fileSize: MEDIA_MAX_BYTES } });
 
 function hashPassword(password: string): string {
   return createHash("sha256").update(password).digest("hex");
@@ -240,6 +253,9 @@ router.get("/panel/events", async (req, res): Promise<void> => {
   const offCall = multiWA.addCallListener((_uid, call) => {
     send("call", { callId: call.callId, outcome: call.outcome, ts: call.ts });
   });
+  const offReaction = multiWA.addReactionListener((_uid, jid, waMessageId, reactorJid, emoji, ts) => {
+    send("reaction", { jid, waMessageId, reactorJid, emoji, ts });
+  });
   const offState = multiWA.addUserListener(PANEL_USER_ID, (state) => {
     send("state", { status: state.status });
   });
@@ -256,6 +272,7 @@ router.get("/panel/events", async (req, res): Promise<void> => {
     offCall();
     offState();
     offStatus();
+    offReaction();
     res.end();
   });
 });
@@ -346,6 +363,209 @@ router.delete("/panel/chats/:jid/:msgId", async (req, res): Promise<void> => {
     res.json({ success: true });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to delete" });
+  }
+});
+
+/** "Delete for me": local-only hide, never a WhatsApp protocol call. */
+router.post("/panel/chats/:jid/:msgId/hide", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await hideForMe(req.params.msgId);
+  res.json({ success: true });
+});
+
+/** Star / unstar a message. */
+router.post("/panel/chats/:jid/:msgId/star", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await setStarred(req.params.msgId, !!req.body?.starred);
+  res.json({ success: true });
+});
+
+/** All starred messages across every chat. */
+router.get("/panel/starred", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  res.json(await getStarredMessages());
+});
+
+/** React to (or, with emoji: "", remove a reaction from) a message. */
+router.post("/panel/chats/:jid/:msgId/react", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const emoji = String(req.body?.emoji ?? "");
+  const fromMe = !!req.body?.fromMe;
+  const participant = req.body?.participant ? String(req.body.participant) : undefined;
+  try {
+    await multiWA.sendReaction(PANEL_USER_ID, req.params.jid, req.params.msgId, fromMe, emoji, participant);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to react" });
+  }
+});
+
+/** Forward an existing message's content to another chat. */
+router.post("/panel/chats/:jid/:msgId/forward", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const toJid = String(req.body?.toJid ?? "").trim();
+  if (!toJid) {
+    res.status(400).json({ error: "toJid required" });
+    return;
+  }
+  const source = await getMessageForForward(req.params.msgId);
+  if (!source) {
+    res.status(404).json({ error: "Message not found" });
+    return;
+  }
+  try {
+    const waMessageId = await multiWA.forwardMessage(PANEL_USER_ID, toJid, source);
+    res.json({ success: true, waMessageId });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to forward" });
+  }
+});
+
+/** Pin / mute / archive a chat — chat-list organization, no WhatsApp protocol call. */
+router.post("/panel/chats/:jid/pin", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await setChatPinned(req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+router.post("/panel/chats/:jid/mute", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await setChatMuted(req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+router.post("/panel/chats/:jid/archive", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await setChatArchived(req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+
+/** Send a photo/video/voice-note/document. Accepts either `jid` (groups) or
+ *  `phone` (1:1) the same way /panel/send does, plus an optional quote. */
+router.post("/panel/send-media", uploadMedia.single("file"), async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "file required" });
+    return;
+  }
+  const jid = String(req.body?.jid ?? "").trim();
+  const phone = String(req.body?.phone ?? "").replace(/\D/g, "");
+  const targetJid = jid || (phone ? `${phone}@s.whatsapp.net` : "");
+  if (!targetJid) {
+    res.status(400).json({ error: "phone (or jid) required" });
+    return;
+  }
+  const kindRaw = String(req.body?.kind ?? "");
+  const kind = (["image", "video", "audio", "document"].includes(kindRaw) ? kindRaw : "document") as
+    "image" | "video" | "audio" | "document";
+  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
+  const quoted = quotedId
+    ? { waMessageId: quotedId, fromMe: !!req.body?.quotedFromMe, text: String(req.body?.quotedText ?? "") }
+    : undefined;
+  try {
+    const waMessageId = await multiWA.sendMedia(PANEL_USER_ID, targetJid, file.buffer, file.mimetype, kind, {
+      caption: req.body?.caption ? String(req.body.caption) : undefined,
+      fileName: file.originalname,
+      quoted,
+    });
+    res.json({ success: true, waMessageId });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to send media" });
+  }
+});
+
+// ── Group management ────────────────────────────────────────────────
+
+router.get("/panel/groups/:jid/info", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  try {
+    res.json(await multiWA.getGroupInfo(PANEL_USER_ID, req.params.jid));
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to load group info" });
+  }
+});
+
+router.post("/panel/groups/:jid/participants", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const jids: string[] = Array.isArray(req.body?.jids) ? req.body.jids.map(String) : [];
+  const action = String(req.body?.action ?? "");
+  if (!jids.length || !["add", "remove", "promote", "demote"].includes(action)) {
+    res.status(400).json({ error: "jids[] and a valid action required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupParticipants(PANEL_USER_ID, req.params.jid, jids, action as any);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update participants" });
+  }
+});
+
+router.put("/panel/groups/:jid/subject", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const subject = String(req.body?.subject ?? "").trim();
+  if (!subject) {
+    res.status(400).json({ error: "subject required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupSubject(PANEL_USER_ID, req.params.jid, subject);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group name" });
+  }
+});
+
+router.put("/panel/groups/:jid/description", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  try {
+    await multiWA.updateGroupDescription(PANEL_USER_ID, req.params.jid, String(req.body?.description ?? ""));
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group description" });
+  }
+});
+
+router.post("/panel/groups/:jid/icon", uploadMedia.single("file"), async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  if (!req.file) {
+    res.status(400).json({ error: "file required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupIcon(PANEL_USER_ID, String(req.params.jid), req.file.buffer);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group icon" });
+  }
+});
+
+router.get("/panel/groups/:jid/invite", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  try {
+    const code = await multiWA.getGroupInviteCode(PANEL_USER_ID, req.params.jid);
+    res.json({ code, link: `https://chat.whatsapp.com/${code}` });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to fetch invite link" });
+  }
+});
+
+router.post("/panel/groups/:jid/invite/revoke", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  try {
+    const code = await multiWA.revokeGroupInviteCode(PANEL_USER_ID, req.params.jid);
+    res.json({ code, link: `https://chat.whatsapp.com/${code}` });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to reset invite link" });
+  }
+});
+
+router.post("/panel/groups/:jid/leave", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  try {
+    await multiWA.leaveGroup(PANEL_USER_ID, req.params.jid);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to leave group" });
   }
 });
 
