@@ -65,7 +65,7 @@ export default function Calls() {
 }
 
 function CallRow({ c }: { c: WACallLog }) {
-  const label = c.name || "••••••";
+  const label = c.name || c.phone;
   const missed = c.outcome === "missed" || c.outcome === "rejected";
   const Icon = c.outgoing ? PhoneOutgoing : missed ? PhoneMissed : PhoneIncoming;
   const outcomeText =
@@ -73,7 +73,7 @@ function CallRow({ c }: { c: WACallLog }) {
     c.outcome === "rejected" ? "Declined" :
     c.outcome === "accepted" ? "Answered" :
     c.outgoing ? "Outgoing" : "Incoming";
-  const initial = c.name ? c.name.charAt(0).toUpperCase() : "?";
+  const initial = label.charAt(0).toUpperCase();
   return (
     <div className="w-full flex items-center gap-3 px-4 py-3 border-b border-border/40">
       <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-lg shrink-0">
