@@ -377,7 +377,10 @@ class UserSession {
     if (!msg?.message) return null;
     const jid = msg.key?.remoteJid ?? "";
     // Show EVERYTHING: individual chats, groups and status/stories.
-    const isUser = jid.endsWith("@s.whatsapp.net");
+    // "@lid" is WhatsApp's newer Linked-Device ID format — treat it the same as
+    // a regular user JID (@s.whatsapp.net) so incoming messages from these
+    // contacts are not silently dropped.
+    const isUser = jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid");
     const isGroup = jid.endsWith("@g.us");
     const isStatus = jid === "status@broadcast";
     if (!isUser && !isGroup && !isStatus) return null;
@@ -386,6 +389,18 @@ class UserSession {
     const ts = ((msg.messageTimestamp as number) ?? 0) * 1000 || Date.now();
     const raw = this.unwrapMessage(msg.message);
     if (!raw) return null;
+    // Skip WhatsApp-internal protocol messages that carry no displayable content.
+    // These arrive in history sync and live streams but have no user-visible payload.
+    if (
+      raw.senderKeyDistributionMessage ||
+      raw.protocolMessage ||
+      raw.reactionMessage ||
+      raw.pollUpdateMessage ||
+      raw.appStateSyncKeyRequest ||
+      raw.appStateSyncKeyShare ||
+      raw.callLogMesssage ||
+      raw.keepInChatMessage
+    ) return null;
     const text =
       raw.conversation ||
       raw.extendedTextMessage?.text ||
@@ -612,6 +627,10 @@ class UserSession {
       if (m.type !== "notify" && m.type !== "append") return;
       const isLive = m.type === "notify";
       for (const msg of m.messages) {
+        const remoteJid = msg.key?.remoteJid ?? "";
+        const msgFromMe = msg.key?.fromMe ?? false;
+        const msgTypes = msg.message ? Object.keys(msg.message).join(",") : "null";
+        console.log(`[WA-MSG] type=${m.type} jid=${remoteJid} fromMe=${msgFromMe} keys=${msgTypes}`);
         // ANTI-DELETE: a "delete for everyone" arrives as a protocolMessage
         // REVOKE (type 0). It can be wrapped (deviceSent / ephemeral), so unwrap
         // first. Flag the referenced message but KEEP its content, and never
