@@ -168,6 +168,12 @@ class UserSession {
   private incomingKeys = new Map<string, { remoteJid: string; id: string; participant?: string; fromMe: boolean }>();
   /** Group jids whose subject (title) we've already fetched, so we don't refetch. */
   private groupNamesFetched = new Set<string>();
+  /** How "authoritative" the currently-stored name for a jid is, so a lower-quality
+   *  source (e.g. a chat title we just guessed) can never clobber a better one
+   *  (e.g. the actual phonebook-saved contact name) once we learn it.
+   *  1 = chat title from history sync / group subject, 2 = real contact
+   *  (phonebook name or WhatsApp-verified business name) from the contacts store. */
+  private nameTier = new Map<string, number>();
 
   addMsgListener(fn: MsgListener) { this.msgListeners.add(fn); return () => this.msgListeners.delete(fn); }
   addStatusListener(fn: StatusListener) { this.statusListeners.add(fn); return () => this.statusListeners.delete(fn); }
@@ -301,24 +307,42 @@ class UserSession {
     sock.groupMetadata(jid)
       .then((meta: any) => {
         const subject = meta?.subject;
-        const entry = this.chatStore.get(jid);
-        if (subject && entry) {
-          entry.meta.name = subject;
-          const last = entry.msgs[entry.msgs.length - 1];
-          if (last) this.notifyPersist(jid, last, true);
-        }
+        if (subject) this.applyName(jid, String(subject), 1);
       })
       .catch(() => { this.groupNamesFetched.delete(jid); });
   }
 
-  private upsertMsg(jid: string, m: WAChatMsg, display: string, history = false, nameHint?: string) {
+  /** Apply a resolved display name to a chat, honouring the tier system so a
+   *  weaker source can never overwrite a stronger one already known (e.g. a
+   *  guessed chat title must never replace the real saved contact name).
+   *  Creates a bare (message-less) chat entry when the chat doesn't exist yet,
+   *  so a contact's real name is remembered the moment WhatsApp tells us about
+   *  it — even before the first message with them is seen. */
+  private applyName(jid: string, name: string, tier: number) {
+    if (!name) return;
+    const prevTier = this.nameTier.get(jid) ?? 0;
+    if (prevTier > tier) return;
+    this.nameTier.set(jid, tier);
+    let entry = this.chatStore.get(jid);
+    if (!entry) {
+      const phone = jid.split("@")[0];
+      this.chatStore.set(jid, { meta: { jid, phone, name, lastMsg: "", lastMsgTs: 0, unread: 0 }, msgs: [] });
+      return;
+    }
+    if (entry.meta.name === name) return;
+    entry.meta.name = name;
+    const last = entry.msgs[entry.msgs.length - 1];
+    if (last) this.notifyPersist(jid, last, true);
+  }
+
+  private upsertMsg(jid: string, m: WAChatMsg, display: string, history = false, nameHint?: string, nameTier = 1) {
     let entry = this.chatStore.get(jid);
     if (!entry) {
       const phone = jid.split("@")[0];
       entry = { meta: { jid, phone, lastMsg: "", lastMsgTs: 0, unread: 0 }, msgs: [] };
       this.chatStore.set(jid, entry);
     }
-    if (nameHint && entry.meta.name !== nameHint) entry.meta.name = nameHint;
+    if (nameHint) this.applyName(jid, nameHint, nameTier);
     let added = false;
     let corrected = false;
     const existing = entry.msgs.find(x => x.id === m.id);
@@ -415,12 +439,15 @@ class UserSession {
     const quotedMsg = raw.extendedTextMessage?.contextInfo?.quotedMessage;
     const quotedText = quotedMsg ? (quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || "") : undefined;
     const quotedId = raw.extendedTextMessage?.contextInfo?.stanzaId ?? undefined;
-    // A readable chat title: "Status" for stories, the sender's WhatsApp display
-    // name (pushName) for individual incoming chats. Group titles are resolved
-    // separately (async groupMetadata) because they aren't on the message.
+    // A readable chat title: "Status" for the stories feed. Individual contact
+    // names come ONLY from the phonebook-saved contact (contacts.upsert/update)
+    // or WhatsApp's own chat-title sync — never the sender's self-set pushName,
+    // which is unreliable (often missing, or literally just their own number)
+    // and caused the name/number mismatch this app used to show. Group titles
+    // are resolved separately (async groupMetadata) because they aren't on the
+    // message.
     let nameHint: string | undefined;
     if (isStatus) nameHint = "Status";
-    else if (isUser && !fromMe && msg.pushName) nameHint = String(msg.pushName);
     return {
       jid,
       display,
@@ -696,10 +723,7 @@ class UserSession {
         }
       }
       // Apply chat titles even for chats with no synced messages yet.
-      for (const [jid, name] of nameByJid) {
-        const entry = this.chatStore.get(jid);
-        if (entry && entry.meta.name !== name) entry.meta.name = name;
-      }
+      for (const [jid, name] of nameByJid) this.applyName(jid, name, 1);
       // Apply the real unread counts reported by WhatsApp for each chat.
       for (const [jid, unread] of unreadByJid) {
         const entry = this.chatStore.get(jid);
@@ -730,6 +754,21 @@ class UserSession {
     sock.ev.on("call", (calls: BaileysEventMap["call"]) => {
       for (const c of calls) this.handleCall(c);
     });
+
+    // The real "saved contact name" source. `contacts.upsert` delivers the full
+    // phonebook-synced contact list once after linking; `contacts.update` streams
+    // incremental changes afterwards (a contact gets renamed, a business gets
+    // verified, etc). `name` is the name saved in the linked phone's contacts;
+    // `verifiedName` is WhatsApp's own verified business name. Either is a real
+    // identity — unlike pushName, which is just the sender's own self-set label
+    // and is never treated as a contact name here.
+    const applyContact = (ct: any) => {
+      const jid: string | undefined = ct?.id;
+      const name = ct?.name || ct?.verifiedName;
+      if (jid && name) this.applyName(jid, String(name), 2);
+    };
+    sock.ev.on("contacts.upsert", (contacts: any[]) => { for (const ct of contacts) applyContact(ct); });
+    sock.ev.on("contacts.update", (updates: any[]) => { for (const ct of updates) applyContact(ct); });
   }
 
   /**

@@ -204,3 +204,16 @@ export function fmtBytes(n: number) {
 export function phoneFromJid(jid: string) {
   return "+" + jid.split("@")[0];
 }
+
+/** Format a raw phone number for display: digits with a leading "+". */
+export function formatPhone(phone: string | null | undefined) {
+  const digits = (phone ?? "").replace(/\D/g, "");
+  return digits ? `+${digits}` : (phone || "Unknown");
+}
+
+/** WhatsApp-Web-style label: the saved contact name if we have one, otherwise
+ *  the phone number itself (never a placeholder like "••••••" — a real number
+ *  is what WhatsApp Web shows for a contact you haven't saved). */
+export function displayName(name: string | null | undefined, phone: string | null | undefined) {
+  return name && name.trim() ? name : formatPhone(phone);
+}

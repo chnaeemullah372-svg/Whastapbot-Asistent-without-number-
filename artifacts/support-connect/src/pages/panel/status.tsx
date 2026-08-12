@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
-import { panel, panelAuth, fmtTime, fmtClock, type StatusGroup } from "@/lib/panelApi";
+import { panel, panelAuth, fmtTime, fmtClock, displayName, type StatusGroup } from "@/lib/panelApi";
 import { CircleDashed, X } from "lucide-react";
 
 // Some text rows are just emoji placeholders the engine stores for media-only
@@ -59,7 +59,7 @@ export default function Status() {
                 Recent updates
               </p>
               {groups.map((g) => {
-                const label = g.name || "••••••";
+                const label = displayName(g.name, g.phone);
                 const initial = g.name ? g.name.charAt(0).toUpperCase() : "?";
                 return (
                   <button
@@ -101,7 +101,7 @@ function StatusViewer({ group, onClose }: { group: StatusGroup; onClose: () => v
   }, [items.length, onClose]);
 
   if (!item) return null;
-  const label = group.name || "••••••";
+  const label = displayName(group.name, group.phone);
   const initial = group.name ? group.name.charAt(0).toUpperCase() : "?";
   const url = panel.mediaUrl(item.waMessageId);
   const next = () => (idx < items.length - 1 ? setIdx(idx + 1) : onClose());

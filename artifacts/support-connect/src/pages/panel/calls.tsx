@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
-import { panel, panelAuth, fmtTime, type WACallLog } from "@/lib/panelApi";
+import { panel, panelAuth, fmtTime, displayName, type WACallLog } from "@/lib/panelApi";
 import { PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, Phone, Info } from "lucide-react";
 
 export default function Calls() {
@@ -65,7 +65,7 @@ export default function Calls() {
 }
 
 function CallRow({ c }: { c: WACallLog }) {
-  const label = c.name || "••••••";
+  const label = displayName(c.name, c.phone);
   const missed = c.outcome === "missed" || c.outcome === "rejected";
   const Icon = c.outgoing ? PhoneOutgoing : missed ? PhoneMissed : PhoneIncoming;
   const outcomeText =

@@ -103,8 +103,13 @@ async function persistMessage(jid: string, phone: string, msg: WAChatMsg, histor
           // arrive out of order).
           lastMsg: sql`CASE WHEN ${msg.ts} >= ${waChatsTable.lastMsgTs} THEN ${msg.text} ELSE ${waChatsTable.lastMsg} END`,
           lastMsgTs: sql`GREATEST(${waChatsTable.lastMsgTs}, ${msg.ts})`,
-          // Fill in / refresh the readable chat title when we learn it.
-          name: sql`COALESCE(${name ?? null}, ${waChatsTable.name})`,
+          // Refresh the readable chat title whenever we learn a (better) one; the
+          // engine only ever calls us with a name once it's at least as
+          // authoritative as what it already knew (see multiWhatsapp's name-tier
+          // system), so it's always safe to overwrite here — never keep a stale
+          // one behind via COALESCE, or a corrected/renamed contact would never
+          // update in the database.
+          name: name != null ? name : sql`${waChatsTable.name}`,
           // Keep the first owning account; only fill it in if it was unknown.
           accountPhone: sql`COALESCE(${waChatsTable.accountPhone}, ${accountPhone})`,
           unread:
@@ -315,7 +320,7 @@ export async function saveCallLog(call: WACall) {
         set: {
           outcome: sql`CASE WHEN ${waCallLogsTable.outcome} IN ('missed','rejected','accepted') THEN ${waCallLogsTable.outcome} ELSE ${call.outcome} END`,
           rawStatus: call.rawStatus,
-          name: sql`COALESCE(${waCallLogsTable.name}, ${call.name ?? null})`,
+          name: call.name != null ? call.name : sql`${waCallLogsTable.name}`,
           isVideo: call.isVideo,
           updatedAt: new Date(),
         },

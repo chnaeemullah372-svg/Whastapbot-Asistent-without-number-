@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import {
-  panel, panelAuth, fmtTime, fmtClock, phoneFromJid,
+  panel, panelAuth, fmtTime, fmtClock, phoneFromJid, displayName,
   type WAChat, type WAMessage, type WAStatus,
 } from "@/lib/panelApi";
 import {
@@ -148,7 +148,7 @@ export default function Chats() {
     (c) =>
       !c.jid.endsWith("@g.us") &&
       c.jid !== "status@broadcast" &&
-      (c.name || "").toLowerCase().includes(search.toLowerCase()),
+      displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()),
   );
 
   if (activeJid) {
@@ -218,7 +218,7 @@ export default function Chats() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{c.name || "••••••"}</span>
+                    <span className="font-medium truncate">{displayName(c.name, c.phone)}</span>
                     <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
                       {fmtTime(c.lastMsgTs)}
                     </span>
@@ -332,7 +332,7 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const phone = phoneFromJid(jid);
-  const title = chat?.name || "••••••";
+  const title = displayName(chat?.name, phone);
 
   const load = useCallback(() => {
     panel.get(`/panel/chats/${encodeURIComponent(jid)}/messages`)
