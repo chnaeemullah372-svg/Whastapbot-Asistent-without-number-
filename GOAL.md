@@ -1,8 +1,74 @@
-# GOAL.md — WhatsApp Panel: Name/Number Resolution & Chat/Status/Group Separation
+# GOAL.md — Building a proper WhatsApp Web clone
 
 > Analysis + plan document requested by the project owner (2026-08-12). Every
 > change made against this goal happens on branch
-> `claude/website-incoming-outgoing-issue-77uox7`.
+> `claude/website-incoming-outgoing-issue-77uox7`, which auto-deploys to the
+> owner's VPS on push. The owner's stated end goal: **this panel should behave
+> like real WhatsApp Web** — every gap found vs. that target gets logged here
+> and worked through.
+
+## Round 1 — name/number resolution + chat/status/group separation
+
+(See §3–5 below — unchanged from the first pass.)
+
+## Round 2 — quoted replies ("mention"), delivery ticks, and a full feature audit
+
+Owner's report (paraphrased): replying to a message ("mention" in their
+wording — quoting a message the way WhatsApp pushes a small quoted snippet
+to the side) wasn't working reliably end-to-end — sending, receiving, and
+the tick status — and asked for a complete sweep of whatever else is missing
+compared to real WhatsApp Web.
+
+### Findings
+
+- `parseWAMessage()` only ever looked for a quote's `contextInfo` on
+  `extendedTextMessage` (plain text replies). WhatsApp attaches
+  `contextInfo` to **any** message type — replying with a photo/video/voice
+  note/document/sticker carries the quote on that media message's own
+  `contextInfo`, not on an `extendedTextMessage`. So quoting a message and
+  replying with media silently dropped the quote.
+- `sendToJid()` (used for **groups**) had no `quoted` parameter at all —
+  only the 1:1 `sendMessage()` path supported sending a quoted reply. Group
+  quoted replies were impossible even at the engine level.
+- `/panel/send` never accepted a quote in its request body, and the
+  frontend (`chats.tsx`, `groups.tsx`) had **no UI to quote-reply at all** —
+  no way to select a message and reply to it. So even though the engine
+  could technically send a quoted reply, nothing in the product let an admin
+  trigger one.
+- The SSE stream (`/panel/events`) had no event for tick changes
+  (sent → delivered → read). The open conversation only found out about a
+  new blue tick on its next 12-second poll, not live like WhatsApp.
+
+### Fixed
+
+- `multiWhatsapp.ts`: new `extractQuoted()` reads `contextInfo` off every
+  message type (text + all media kinds), so a quote is never lost based on
+  what the reply itself contains.
+- `multiWhatsapp.ts`: `sendToJid()` now accepts and sends a `quoted` payload,
+  same as `sendMessage()` — group quoted replies now work at the engine
+  level.
+- `panel.ts`: `/panel/send` accepts `quotedId` / `quotedFromMe` /
+  `quotedText` and passes them through to whichever send path is used.
+  `/panel/events` now emits a `status` SSE event on every tick change.
+- `chats.tsx` / `groups.tsx`: tapping any message now offers **Reply**
+  (own or the other party's messages) in addition to Delete (own messages
+  only); replying shows a WhatsApp-style quoted preview bar above the
+  composer with a cancel (×), and sending includes the quote. Both list
+  screens now bump the open conversation on the new `status` SSE event, so
+  ticks update instantly.
+
+### Full feature-parity audit (in progress)
+
+A comprehensive read-only audit is being run against the rest of the real
+WhatsApp Web feature set (reactions, message editing, delete-for-me vs
+delete-for-everyone, forwarding, starred/pinned messages, chat pin/mute/
+archive, typing/presence, @mentions, link previews, group management,
+profile photos, view-once handling, disappearing messages, in-chat search,
+sending media as an outgoing message, multi-account switching, and more).
+Results will be appended below with a prioritized backlog once it completes
+— the owner explicitly asked for "check everything else, whatever's
+missing, add it" since the goal is a complete WhatsApp Web clone, not just
+the two items above.
 
 ## 1. Reported problem (as described by the owner, in Urdu)
 

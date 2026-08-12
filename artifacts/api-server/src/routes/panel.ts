@@ -232,6 +232,11 @@ router.get("/panel/events", async (req, res): Promise<void> => {
   const offDelete = multiWA.addDeleteListener((_uid, waMessageId) => {
     send("delete", { waMessageId });
   });
+  // Sent/delivered/read (single/double/blue tick) updates — without this the
+  // open conversation only learned about a tick change on its next slow poll.
+  const offStatus = multiWA.addStatusListener((_uid, update) => {
+    send("status", { waMessageId: update.waMessageId, jid: update.jid, status: update.status });
+  });
   const offCall = multiWA.addCallListener((_uid, call) => {
     send("call", { callId: call.callId, outcome: call.outcome, ts: call.ts });
   });
@@ -250,6 +255,7 @@ router.get("/panel/events", async (req, res): Promise<void> => {
     offDelete();
     offCall();
     offState();
+    offStatus();
     res.end();
   });
 });
@@ -304,7 +310,9 @@ router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
   res.json({ success: true });
 });
 
-/** Send a message to a phone number OR a group JID (creates the chat if new). */
+/** Send a message to a phone number OR a group JID (creates the chat if new).
+ *  Optionally carries a WhatsApp-style quoted reply (quotedId/quotedFromMe/
+ *  quotedText), the way tapping "Reply" on a message in the panel works. */
 router.post("/panel/send", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
   const jid   = String(req.body?.jid  ?? "").trim();          // full JID for groups
@@ -314,10 +322,14 @@ router.post("/panel/send", async (req, res): Promise<void> => {
     res.status(400).json({ error: "phone (or jid) and text required" });
     return;
   }
+  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
+  const quoted = quotedId
+    ? { waMessageId: quotedId, fromMe: !!req.body?.quotedFromMe, text: String(req.body?.quotedText ?? "") }
+    : undefined;
   try {
     const waMessageId = jid
-      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text)
-      : await multiWA.sendMessage(PANEL_USER_ID, phone, text);
+      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text, quoted)
+      : await multiWA.sendMessage(PANEL_USER_ID, phone, text, quoted);
     res.json({ success: true, waMessageId });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to send" });

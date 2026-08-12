@@ -7,7 +7,7 @@ import {
 } from "@/lib/panelApi";
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
-  Loader2, MoreVertical, Circle, Users2,
+  Loader2, MoreVertical, Circle, Users2, Reply, X,
 } from "lucide-react";
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
@@ -84,6 +84,9 @@ export default function Groups() {
     const es = new EventSource(panel.eventsUrl());
     es.addEventListener("message", bump);
     es.addEventListener("delete", bump);
+    // Sent/delivered/read (blue tick) changes — bump so the open conversation
+    // reloads and shows the updated tick instantly instead of waiting on poll.
+    es.addEventListener("status", bump);
     es.addEventListener("state", () => loadStatus());
     return () => { if (debounce) clearTimeout(debounce); es.close(); };
   }, [user, loadChats, loadStatus]);
@@ -194,6 +197,7 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const title = chat?.name || "Group";
@@ -213,7 +217,7 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
 
   useEffect(() => { if (liveTick > 0) load(); }, [liveTick, load]);
 
-  useEffect(() => { didInitialScroll.current = false; }, [jid]);
+  useEffect(() => { didInitialScroll.current = false; setReplyTo(null); }, [jid]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -231,9 +235,13 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
     if (!body) return;
     setSending(true);
     setText("");
+    const quote = replyTo
+      ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
+      : {};
     try {
       // Pass the full group JID so the backend routes to sendToJid
-      await panel.post("/panel/send", { jid, text: body });
+      await panel.post("/panel/send", { jid, text: body, ...quote });
+      setReplyTo(null);
       load();
     } catch {
       setText(body);
@@ -270,7 +278,7 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
         {messages.map((m) => (
           <div key={m.waMessageId} className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
             <div
-              onClick={() => m.fromMe && !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
+              onClick={() => !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
               className={`relative max-w-[78%] rounded-lg px-3 py-1.5 text-sm shadow-sm ${
                 m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
               }`}
@@ -305,12 +313,22 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <button
-                  onClick={() => del(m)}
-                  className="absolute -top-2 right-0 translate-y-[-100%] flex items-center gap-1.5 bg-popover border border-border rounded-lg px-3 py-1.5 text-xs text-destructive shadow-lg z-10"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>
+                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[110px]">
+                  <button
+                    onClick={() => { setReplyTo(m); setMenuFor(null); }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent"
+                  >
+                    <Reply className="w-3.5 h-3.5" /> Reply
+                  </button>
+                  {m.fromMe && (
+                    <button
+                      onClick={() => del(m)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Delete
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -321,6 +339,19 @@ function GroupConversation({ jid, chat, liveTick, onBack }: { jid: string; chat?
           </div>
         )}
       </div>
+
+      {/* Reply-to preview */}
+      {replyTo && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-wa-panel border-t border-border shrink-0">
+          <div className="flex-1 min-w-0 border-l-2 border-primary pl-2">
+            <p className="text-xs font-medium text-primary truncate">{replyTo.fromMe ? "You" : "Group member"}</p>
+            <p className="text-xs text-muted-foreground truncate">{replyTo.text}</p>
+          </div>
+          <button type="button" onClick={() => setReplyTo(null)} className="p-1 shrink-0" aria-label="Cancel reply">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
 
       <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
         <input

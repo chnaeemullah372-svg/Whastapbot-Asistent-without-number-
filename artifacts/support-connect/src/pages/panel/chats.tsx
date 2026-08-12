@@ -7,7 +7,7 @@ import {
 } from "@/lib/panelApi";
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
-  MessageSquarePlus, X, Loader2, MoreVertical, Circle,
+  MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply,
 } from "lucide-react";
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
@@ -113,6 +113,9 @@ export default function Chats() {
     const es = new EventSource(panel.eventsUrl());
     es.addEventListener("message", bump);
     es.addEventListener("delete", bump);
+    // Sent/delivered/read (blue tick) changes — bump so the open conversation
+    // reloads and shows the updated tick instantly instead of waiting on poll.
+    es.addEventListener("status", bump);
     es.addEventListener("state", () => loadStatus());
     return () => {
       if (debounce) clearTimeout(debounce);
@@ -329,6 +332,7 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const phone = phoneFromJid(jid);
@@ -354,9 +358,11 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     if (liveTick > 0) load();
   }, [liveTick, load]);
 
-  // Opening a different chat must re-jump to its newest message.
+  // Opening a different chat must re-jump to its newest message and drop any
+  // reply-to draft from the previous conversation.
   useEffect(() => {
     didInitialScroll.current = false;
+    setReplyTo(null);
   }, [jid]);
 
   // Keep the newest message in view like WhatsApp: always land at the bottom when
@@ -379,8 +385,12 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     if (!body) return;
     setSending(true);
     setText("");
+    const quote = replyTo
+      ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
+      : {};
     try {
-      await panel.post("/panel/send", { phone: phone.replace("+", ""), text: body });
+      await panel.post("/panel/send", { phone: phone.replace("+", ""), text: body, ...quote });
+      setReplyTo(null);
       load();
     } catch {
       setText(body);
@@ -418,7 +428,7 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
         {messages.map((m) => (
           <div key={m.waMessageId} className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
             <div
-              onClick={() => m.fromMe && !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
+              onClick={() => !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
               className={`relative max-w-[78%] rounded-lg px-3 py-1.5 text-sm shadow-sm ${
                 m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
               }`}
@@ -453,12 +463,22 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <button
-                  onClick={() => del(m)}
-                  className="absolute -top-2 right-0 translate-y-[-100%] flex items-center gap-1.5 bg-popover border border-border rounded-lg px-3 py-1.5 text-xs text-destructive shadow-lg z-10"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>
+                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[110px]">
+                  <button
+                    onClick={() => { setReplyTo(m); setMenuFor(null); }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent"
+                  >
+                    <Reply className="w-3.5 h-3.5" /> Reply
+                  </button>
+                  {m.fromMe && (
+                    <button
+                      onClick={() => del(m)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Delete
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -469,6 +489,19 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
           </div>
         )}
       </div>
+
+      {/* Reply-to preview */}
+      {replyTo && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-wa-panel border-t border-border shrink-0">
+          <div className="flex-1 min-w-0 border-l-2 border-primary pl-2">
+            <p className="text-xs font-medium text-primary truncate">{replyTo.fromMe ? "You" : title}</p>
+            <p className="text-xs text-muted-foreground truncate">{replyTo.text}</p>
+          </div>
+          <button type="button" onClick={() => setReplyTo(null)} className="p-1 shrink-0" aria-label="Cancel reply">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
 
       {/* Composer */}
       <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">

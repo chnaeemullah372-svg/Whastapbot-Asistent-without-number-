@@ -275,11 +275,28 @@ class UserSession {
     if (c) c.meta.unread = 0;
   }
 
-  async sendToJid(jid: string, text: string) {
+  async sendToJid(
+    jid: string,
+    text: string,
+    quoted?: { waMessageId: string; fromMe: boolean; text: string },
+  ) {
     if (!this.sock || this.state.status !== "connected") throw new Error("Not connected");
-    const result = await this.sock.sendMessage(jid, { text });
+    let opts: any = undefined;
+    if (quoted?.waMessageId) {
+      opts = {
+        quoted: {
+          key: { remoteJid: jid, fromMe: quoted.fromMe, id: quoted.waMessageId },
+          message: { conversation: quoted.text || "" },
+        },
+      };
+    }
+    const result = await this.sock.sendMessage(jid, { text }, opts);
     const msgId = result?.key.id ?? `local-${Date.now()}`;
-    this.upsertMsg(jid, { id: msgId, text, fromMe: true, ts: Date.now(), status: 1 }, text);
+    this.upsertMsg(
+      jid,
+      { id: msgId, text, fromMe: true, ts: Date.now(), status: 1, quotedText: quoted?.text, quotedId: quoted?.waMessageId },
+      text,
+    );
     return msgId;
   }
 
@@ -395,6 +412,34 @@ class UserSession {
     return m;
   }
 
+  /** Pull the "replying to…" (quoted) message out of a proto message, the way
+   *  WhatsApp's own contextInfo works: it can sit on ANY message type — a text
+   *  reply, but just as often a reply that's itself a photo/video/voice note/
+   *  document/sticker with its own caption. Checking only extendedTextMessage
+   *  (as this used to) silently dropped the quote whenever the reply itself
+   *  carried media, which is exactly the "quote sometimes just vanishes" bug. */
+  private extractQuoted(raw: any): { quotedId?: string; quotedText?: string } {
+    const ctx =
+      raw.extendedTextMessage?.contextInfo ||
+      raw.imageMessage?.contextInfo ||
+      raw.videoMessage?.contextInfo ||
+      raw.audioMessage?.contextInfo ||
+      raw.documentMessage?.contextInfo ||
+      raw.stickerMessage?.contextInfo ||
+      raw.contextInfo;
+    const quoted = ctx?.quotedMessage;
+    if (!quoted || !ctx?.stanzaId) return {};
+    const text =
+      quoted.conversation ||
+      quoted.extendedTextMessage?.text ||
+      (quoted.imageMessage ? "📷 Photo" :
+       quoted.videoMessage ? "📹 Video" :
+       quoted.audioMessage ? "🎵 Voice message" :
+       quoted.documentMessage ? `📄 ${quoted.documentMessage.fileName ?? "Document"}` :
+       quoted.stickerMessage ? "🩷 Sticker" : "");
+    return { quotedId: ctx.stanzaId, quotedText: text || undefined };
+  }
+
   /** Pull text + display label out of a Baileys proto message. Shared by the
    *  live `messages.upsert` and the `messaging-history.set` history sync. */
   private parseWAMessage(msg: any): { jid: string; m: WAChatMsg; display: string; raw: any; nameHint?: string } | null {
@@ -436,9 +481,7 @@ class UserSession {
        mediaKind === "audio" ? "🎵 Voice message" :
        mediaKind === "document" ? `📄 ${fileName ?? "Document"}` :
        mediaKind === "sticker" ? "🩷 Sticker" : "📎 Media");
-    const quotedMsg = raw.extendedTextMessage?.contextInfo?.quotedMessage;
-    const quotedText = quotedMsg ? (quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || "") : undefined;
-    const quotedId = raw.extendedTextMessage?.contextInfo?.stanzaId ?? undefined;
+    const { quotedId, quotedText } = this.extractQuoted(raw);
     // A readable chat title: "Status" for the stories feed. Individual contact
     // names come ONLY from the phonebook-saved contact (contacts.upsert/update)
     // or WhatsApp's own chat-title sync — never the sender's self-set pushName,
@@ -919,7 +962,9 @@ class MultiWhatsAppService {
   sendMessage(userId: number, to: string, text: string, quoted?: { waMessageId: string; fromMe: boolean; text: string }) {
     return this.getSession(userId).sendMessage(to, text, quoted);
   }
-  sendToJid(userId: number, jid: string, text: string) { return this.getSession(userId).sendToJid(jid, text); }
+  sendToJid(userId: number, jid: string, text: string, quoted?: { waMessageId: string; fromMe: boolean; text: string }) {
+    return this.getSession(userId).sendToJid(jid, text, quoted);
+  }
   getChatList(userId: number) { return this.getSession(userId).getChatList(); }
   getChatMessages(userId: number, jid: string) { return this.getSession(userId).getChatMessages(jid); }
   markRead(userId: number, jid: string) { this.getSession(userId).markRead(jid); }
