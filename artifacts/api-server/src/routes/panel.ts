@@ -256,6 +256,9 @@ router.get("/panel/events", async (req, res): Promise<void> => {
   const offReaction = multiWA.addReactionListener((_uid, jid, waMessageId, reactorJid, emoji, ts) => {
     send("reaction", { jid, waMessageId, reactorJid, emoji, ts });
   });
+  const offPresence = multiWA.addPresenceListener((_uid, jid, presence, lastSeen) => {
+    send("presence", { jid, presence, lastSeen });
+  });
   const offState = multiWA.addUserListener(PANEL_USER_ID, (state) => {
     send("state", { status: state.status });
   });
@@ -273,6 +276,7 @@ router.get("/panel/events", async (req, res): Promise<void> => {
     offState();
     offStatus();
     offReaction();
+    offPresence();
     res.end();
   });
 });
@@ -324,6 +328,24 @@ router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
   multiWA.markRead(PANEL_USER_ID, req.params.jid);
   await clearUnread(req.params.jid);
+  // Opening a chat is also when WhatsApp expects a presence subscription —
+  // without this, most 1:1 chats never push online/typing updates at all.
+  void multiWA.subscribePresence(PANEL_USER_ID, req.params.jid);
+  res.json({ success: true });
+});
+
+/** Current cached online/typing state for a chat (SSE only pushes changes,
+ *  so the UI needs this once when a conversation first opens). */
+router.get("/panel/chats/:jid/presence", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  res.json(multiWA.getPresence(PANEL_USER_ID, req.params.jid) ?? null);
+});
+
+/** Tell WhatsApp we're typing (or done typing) a reply — the composing/paused
+ *  indicator real WhatsApp Web sends while the admin is writing. */
+router.post("/panel/chats/:jid/typing", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  await multiWA.setTyping(PANEL_USER_ID, req.params.jid, !!req.body?.composing);
   res.json({ success: true });
 });
 

@@ -145,6 +145,9 @@ type DeleteListener = (userId: number, waMessageId: string) => void;
 type ReactionListener = (
   userId: number, jid: string, waMessageId: string, reactorJid: string, emoji: string, ts: number,
 ) => void;
+/** Fired on a presence change for a chat: "composing" (typing…), "recording"
+ *  (voice note), "available" (online), "paused"/"unavailable" (idle/offline). */
+type PresenceListener = (userId: number, jid: string, presence: string, lastSeen?: number) => void;
 
 /** A WhatsApp call notification captured from a linked device. A linked device
  *  receives only call NOTIFICATIONS (offer + terminal state), so the talk
@@ -185,6 +188,8 @@ class UserSession {
   private deleteListeners: Set<DeleteListener> = new Set();
   private callListeners: Set<CallListener> = new Set();
   private reactionListeners: Set<ReactionListener> = new Set();
+  private presenceListeners: Set<PresenceListener> = new Set();
+  private presenceByJid = new Map<string, { presence: string; lastSeen?: number }>();
   private chatStore = new Map<string, { meta: WAChat; msgs: WAChatMsg[] }>();
   /** Map of waMessageId → key, for sendReceipt round-trips. */
   private incomingKeys = new Map<string, { remoteJid: string; id: string; participant?: string; fromMe: boolean }>();
@@ -207,6 +212,7 @@ class UserSession {
   addDeleteListener(fn: DeleteListener) { this.deleteListeners.add(fn); return () => this.deleteListeners.delete(fn); }
   addCallListener(fn: CallListener) { this.callListeners.add(fn); return () => this.callListeners.delete(fn); }
   addReactionListener(fn: ReactionListener) { this.reactionListeners.add(fn); return () => this.reactionListeners.delete(fn); }
+  addPresenceListener(fn: PresenceListener) { this.presenceListeners.add(fn); return () => this.presenceListeners.delete(fn); }
   private notifyPersist(jid: string, msg: WAChatMsg, history = false) {
     const phone = jid.split("@")[0];
     const meta = this.chatStore.get(jid)?.meta;
@@ -217,6 +223,26 @@ class UserSession {
   }
   private notifyReaction(jid: string, waMessageId: string, reactorJid: string, emoji: string, ts: number) {
     for (const fn of this.reactionListeners) { try { fn(this.userId, jid, waMessageId, reactorJid, emoji, ts); } catch {} }
+  }
+  private notifyPresence(jid: string, presence: string, lastSeen?: number) {
+    this.presenceByJid.set(jid, { presence, lastSeen });
+    for (const fn of this.presenceListeners) { try { fn(this.userId, jid, presence, lastSeen); } catch {} }
+  }
+
+  getPresence(jid: string) { return this.presenceByJid.get(jid); }
+
+  /** Ask WhatsApp to start pushing presence (online/typing) updates for this
+   *  chat — WhatsApp doesn't send them unsolicited for most 1:1 chats. */
+  async subscribePresence(jid: string) {
+    if (!this.sock || this.state.status !== "connected") return;
+    try { await this.sock.presenceSubscribe(jid); } catch {}
+  }
+
+  /** Tell the other side we're typing (or done typing) — the composing/paused
+   *  indicator real WhatsApp Web sends while you're writing a reply. */
+  async setTyping(jid: string, composing: boolean) {
+    if (!this.sock || this.state.status !== "connected") return;
+    try { await this.sock.sendPresenceUpdate(composing ? "composing" : "paused", jid); } catch {}
   }
   private notifyCall(call: WACall) {
     for (const fn of this.callListeners) { try { fn(this.userId, call); } catch {} }
@@ -1088,6 +1114,15 @@ class UserSession {
     };
     sock.ev.on("contacts.upsert", (contacts: any[]) => { for (const ct of contacts) applyContact(ct); });
     sock.ev.on("contacts.update", (updates: any[]) => { for (const ct of updates) applyContact(ct); });
+
+    // Online / typing / recording status for a chat we've subscribed to.
+    sock.ev.on("presence.update", ({ id, presences }: any) => {
+      const entry = presences?.[id] ?? Object.values(presences ?? {})[0];
+      if (!entry) return;
+      const presence = entry.lastKnownPresence ?? "unavailable";
+      const lastSeen = entry.lastSeen ? entry.lastSeen * 1000 : undefined;
+      this.notifyPresence(id, presence, lastSeen);
+    });
   }
 
   /**
@@ -1180,6 +1215,7 @@ class MultiWhatsAppService {
   private globalDeleteListeners: Set<DeleteListener> = new Set();
   private globalCallListeners: Set<CallListener> = new Set();
   private globalReactionListeners: Set<ReactionListener> = new Set();
+  private globalPresenceListeners: Set<PresenceListener> = new Set();
 
   addGlobalListener(fn: (state: UserWAState) => void) {
     this.globalListeners.add(fn);
@@ -1210,6 +1246,12 @@ class MultiWhatsAppService {
     return () => this.globalReactionListeners.delete(fn);
   }
 
+  /** Subscribe to presence (online/typing) changes across all sessions. */
+  addPresenceListener(fn: PresenceListener) {
+    this.globalPresenceListeners.add(fn);
+    return () => this.globalPresenceListeners.delete(fn);
+  }
+
   /** Load DB chat history into a session's in-memory store (call before connect). */
   hydrate(userId: number, chats: HydrateChat[]) { this.getSession(userId).hydrate(chats); }
 
@@ -1236,6 +1278,9 @@ class MultiWhatsAppService {
       });
       sess.addReactionListener((uid, jid, waMessageId, reactorJid, emoji, ts) => {
         for (const fn of this.globalReactionListeners) { try { fn(uid, jid, waMessageId, reactorJid, emoji, ts); } catch {} }
+      });
+      sess.addPresenceListener((uid, jid, presence, lastSeen) => {
+        for (const fn of this.globalPresenceListeners) { try { fn(uid, jid, presence, lastSeen); } catch {} }
       });
       this.sessions.set(userId, sess);
     }
@@ -1288,6 +1333,9 @@ class MultiWhatsAppService {
   getGroupInviteCode(userId: number, jid: string) { return this.getSession(userId).getGroupInviteCode(jid); }
   revokeGroupInviteCode(userId: number, jid: string) { return this.getSession(userId).revokeGroupInviteCode(jid); }
   leaveGroup(userId: number, jid: string) { return this.getSession(userId).leaveGroup(jid); }
+  subscribePresence(userId: number, jid: string) { return this.getSession(userId).subscribePresence(jid); }
+  setTyping(userId: number, jid: string, composing: boolean) { return this.getSession(userId).setTyping(jid, composing); }
+  getPresence(userId: number, jid: string) { return this.getSession(userId).getPresence(jid); }
   addMsgListener(fn: MsgListener) { this.globalMsgListeners.add(fn); return () => this.globalMsgListeners.delete(fn); }
   addStatusListener(fn: StatusListener) { this.globalStatusListeners.add(fn); return () => this.globalStatusListeners.delete(fn); }
 

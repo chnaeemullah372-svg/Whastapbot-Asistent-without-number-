@@ -98,6 +98,7 @@ export default function Chats() {
   // A counter bumped on every realtime event; the open Conversation watches it
   // and reloads instantly so a new/deleted message shows without waiting on poll.
   const [liveTick, setLiveTick] = useState(0);
+  const [presenceByJid, setPresenceByJid] = useState<Record<string, { presence: string; lastSeen?: number }>>({});
 
   useEffect(() => {
     if (!user) return;
@@ -131,6 +132,13 @@ export default function Chats() {
     // reloads and shows the updated tick instantly instead of waiting on poll.
     es.addEventListener("status", bump);
     es.addEventListener("state", () => loadStatus());
+    // Online / typing / recording status for whichever chat is subscribed.
+    es.addEventListener("presence", (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        setPresenceByJid((prev) => ({ ...prev, [data.jid]: { presence: data.presence, lastSeen: data.lastSeen } }));
+      } catch {}
+    });
     return () => {
       if (debounce) clearTimeout(debounce);
       es.close();
@@ -175,6 +183,7 @@ export default function Chats() {
         jid={activeJid}
         chat={chats.find((c) => c.jid === activeJid)}
         allChats={individualChats}
+        presence={presenceByJid[activeJid]}
         liveTick={liveTick}
         onBack={() => {
           // Prefer unwinding the history entry we pushed (so the device back
@@ -375,10 +384,16 @@ function NewChatSheet({ onClose, onStart }: { onClose: () => void; onStart: (jid
 }
 
 function Conversation({
-  jid, chat, allChats, liveTick, onBack,
-}: { jid: string; chat?: WAChat; allChats: WAChat[]; liveTick: number; onBack: () => void }) {
+  jid, chat, allChats, presence, liveTick, onBack,
+}: {
+  jid: string; chat?: WAChat; allChats: WAChat[];
+  presence?: { presence: string; lastSeen?: number };
+  liveTick: number; onBack: () => void;
+}) {
   const [messages, setMessages] = useState<WAMessage[]>([]);
   const [text, setText] = useState("");
+  const wasComposing = useRef(false);
+  const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -443,6 +458,11 @@ function Conversation({
     setSending(true);
     setSendError("");
     setText("");
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    if (wasComposing.current) {
+      wasComposing.current = false;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+    }
     const quote = replyTo
       ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
       : {};
@@ -488,6 +508,31 @@ function Conversation({
       setSending(false);
     }
   }
+
+  // Tell WhatsApp we're composing a reply (debounced) — real WhatsApp Web
+  // sends this as you type and "paused" a moment after you stop.
+  function onTypingChange(value: string) {
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    if (value.trim() && !wasComposing.current) {
+      wasComposing.current = true;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: true }).catch(() => {});
+    }
+    typingTimeout.current = setTimeout(() => {
+      wasComposing.current = false;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+    }, 3000);
+  }
+
+  // Stop signalling "typing" the moment we leave this chat.
+  useEffect(() => {
+    return () => {
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      if (wasComposing.current) {
+        wasComposing.current = false;
+        panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+      }
+    };
+  }, [jid]);
 
   async function del(msg: WAMessage) {
     setMenuFor(null);
@@ -535,6 +580,13 @@ function Conversation({
     ? messages.filter((m) => m.text.toLowerCase().includes(chatSearch.toLowerCase()))
     : messages;
 
+  const presenceLabel =
+    presence?.presence === "composing" ? "typing…" :
+    presence?.presence === "recording" ? "recording audio…" :
+    presence?.presence === "available" ? "online" :
+    presence?.lastSeen ? `last seen ${fmtTime(presence.lastSeen)}` :
+    null;
+
   return (
     <div className="h-[100dvh] bg-background flex flex-col max-w-md mx-auto">
       {/* Conversation header — sidebar hidden, back button shown */}
@@ -545,6 +597,11 @@ function Conversation({
         <Avatar url={chat?.avatarUrl} label={title} size={36} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold leading-tight truncate">{title}</p>
+          {presenceLabel && (
+            <p className={`text-[11px] leading-tight truncate ${presenceLabel === "typing…" ? "text-emerald-300" : "text-white/60"}`}>
+              {presenceLabel}
+            </p>
+          )}
         </div>
         <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
           <Search className="w-5 h-5" />
@@ -719,7 +776,7 @@ function Conversation({
         </button>
         <input
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { setText(e.target.value); onTypingChange(e.target.value); }}
           placeholder="Type a message"
           className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
         />
