@@ -497,12 +497,14 @@ export async function getStatusGroups() {
     .where(eq(waMessagesTable.jid, "status@broadcast"))
     .orderBy(desc(waMessagesTable.ts));
 
-  // Resolve poster display names from the chat registry.
+  // Resolve poster display names + photos from the chat registry.
   const chats = await db
-    .select({ jid: waChatsTable.jid, phone: waChatsTable.phone, name: waChatsTable.name })
+    .select({ jid: waChatsTable.jid, phone: waChatsTable.phone, name: waChatsTable.name, avatarUrl: waChatsTable.avatarUrl })
     .from(waChatsTable);
-  const nameByJid = new Map(chats.map((c) => [c.jid, c.name]));
-  const nameByPhone = new Map(chats.map((c) => [c.phone, c.name]));
+  const nameByJid = new Map<string, string | null>(chats.map((c: any) => [c.jid, c.name]));
+  const nameByPhone = new Map<string, string | null>(chats.map((c: any) => [c.phone, c.name]));
+  const avatarByJid = new Map<string, string | null>(chats.map((c: any) => [c.jid, c.avatarUrl]));
+  const avatarByPhone = new Map<string, string | null>(chats.map((c: any) => [c.phone, c.avatarUrl]));
 
   type StatusItem = {
     waMessageId: string;
@@ -518,6 +520,7 @@ export async function getStatusGroups() {
     participant: string;
     phone: string;
     name: string | null;
+    avatarUrl: string | null;
     latestTs: number;
     count: number;
     items: StatusItem[];
@@ -536,7 +539,11 @@ export async function getStatusGroups() {
         nameByJid.get(pj) ??
         (phone ? nameByPhone.get(phone) ?? null : null) ??
         null;
-      g = { participant: pj, phone, name, latestTs: r.ts, count: 0, items: [] };
+      const avatarUrl =
+        avatarByJid.get(pj) ??
+        (phone ? avatarByPhone.get(phone) ?? null : null) ??
+        null;
+      g = { participant: pj, phone, name, avatarUrl, latestTs: r.ts, count: 0, items: [] };
       groups.set(pj, g);
     }
     g.count++;

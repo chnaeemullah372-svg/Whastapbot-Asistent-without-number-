@@ -1,14 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
+import { Avatar } from "@/components/avatar";
 import {
   panel, panelAuth, fmtTime, fmtClock, phoneFromJid, displayName,
   type WAChat, type WAMessage, type WAStatus,
 } from "@/lib/panelApi";
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
-  MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply,
+  MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply, Star,
+  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer,
 } from "lucide-react";
+
+const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
 
@@ -60,6 +64,16 @@ export default function Chats() {
   const [waStatus, setWaStatus] = useState<WAStatus>("disconnected");
   const [connChecked, setConnChecked] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [chatMenuFor, setChatMenuFor] = useState<string | null>(null);
+
+  async function toggleChatFlag(jid: string, flag: "pin" | "mute" | "archive", value: boolean) {
+    setChatMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${flag}`, { value });
+      loadChats();
+    } catch {}
+  }
 
   // A genuine 401 means the token was invalidated (e.g. password changed) — log
   // out. Any other failure (server restart, network blip) is transient: keep the
@@ -147,18 +161,20 @@ export default function Chats() {
   }, [activeJid, loadChats]);
 
   // Individual chats only — exclude groups (@g.us) and status broadcasts
-  const filtered = chats.filter(
-    (c) =>
-      !c.jid.endsWith("@g.us") &&
-      c.jid !== "status@broadcast" &&
-      displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()),
-  );
+  const individualChats = chats.filter((c) => !c.jid.endsWith("@g.us") && c.jid !== "status@broadcast");
+  const archivedCount = individualChats.filter((c) => c.archived).length;
+  const filtered = individualChats
+    .filter((c) => (showArchived ? c.archived : !c.archived))
+    .filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()))
+    // Pinned chats float to the top, exactly like WhatsApp; otherwise newest first.
+    .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.lastMsgTs - a.lastMsgTs));
 
   if (activeJid) {
     return (
       <Conversation
         jid={activeJid}
         chat={chats.find((c) => c.jid === activeJid)}
+        allChats={individualChats}
         liveTick={liveTick}
         onBack={() => {
           // Prefer unwinding the history entry we pushed (so the device back
@@ -201,41 +217,72 @@ export default function Chats() {
           </div>
         </div>
 
+        {/* Archived toggle — mirrors WhatsApp's "Archived" row at the top of the list */}
+        {archivedCount > 0 && (
+          <button
+            onClick={() => setShowArchived((v) => !v)}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm border-b border-border/40 hover:bg-card/60 transition"
+          >
+            <Archive className="w-4 h-4 text-muted-foreground" />
+            {showArchived ? "Back to chats" : `Archived (${archivedCount})`}
+          </button>
+        )}
+
         {/* Chat list */}
         <div className="flex-1 overflow-y-auto wa-scroll">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-8 text-muted-foreground">
               <MessageSquarePlus className="w-12 h-12 mb-3 opacity-40" />
-              <p className="text-sm">No chats yet.</p>
-              <p className="text-xs mt-1">Start a new conversation with the button below.</p>
+              <p className="text-sm">{showArchived ? "No archived chats." : "No chats yet."}</p>
+              {!showArchived && <p className="text-xs mt-1">Start a new conversation with the button below.</p>}
             </div>
           ) : (
             filtered.map((c) => (
-              <button
-                key={c.jid}
-                onClick={() => setActiveJid(c.jid)}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition text-left border-b border-border/40"
-              >
-                <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-lg shrink-0">
-                  {c.name ? c.name.charAt(0).toUpperCase() : "?"}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{displayName(c.name, c.phone)}</span>
-                    <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
-                      {fmtTime(c.lastMsgTs)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 mt-0.5">
-                    <span className="text-sm text-muted-foreground truncate">{c.lastMsg}</span>
-                    {c.unread > 0 && (
-                      <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center">
-                        {c.unread}
+              <div key={c.jid} className="relative w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition border-b border-border/40">
+                <button onClick={() => setActiveJid(c.jid)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
+                  <Avatar url={c.avatarUrl} label={displayName(c.name, c.phone)} size={48} textClassName="text-lg" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium truncate flex items-center gap-1">
+                        {c.pinned && <Pin className="w-3 h-3 text-muted-foreground shrink-0" />}
+                        {c.muted && <BellOff className="w-3 h-3 text-muted-foreground shrink-0" />}
+                        {displayName(c.name, c.phone)}
                       </span>
-                    )}
+                      <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
+                        {fmtTime(c.lastMsgTs)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                      <span className="text-sm text-muted-foreground truncate">{c.lastMsg}</span>
+                      {c.unread > 0 && (
+                        <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center">
+                          {c.unread}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </button>
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setChatMenuFor(chatMenuFor === c.jid ? null : c.jid); }}
+                  className="p-1 shrink-0 text-muted-foreground"
+                  aria-label="Chat options"
+                >
+                  <MoreVertical className="w-4 h-4" />
+                </button>
+                {chatMenuFor === c.jid && (
+                  <div className="absolute top-10 right-4 flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[160px] text-sm">
+                    <button onClick={() => toggleChatFlag(c.jid, "pin", !c.pinned)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <Pin className="w-3.5 h-3.5" /> {c.pinned ? "Unpin chat" : "Pin chat"}
+                    </button>
+                    <button onClick={() => toggleChatFlag(c.jid, "mute", !c.muted)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <BellOff className="w-3.5 h-3.5" /> {c.muted ? "Unmute" : "Mute notifications"}
+                    </button>
+                    <button onClick={() => toggleChatFlag(c.jid, "archive", !c.archived)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <Archive className="w-3.5 h-3.5" /> {c.archived ? "Unarchive" : "Archive chat"}
+                    </button>
+                  </div>
+                )}
+              </div>
             ))
           )}
         </div>
@@ -327,13 +374,20 @@ function NewChatSheet({ onClose, onStart }: { onClose: () => void; onStart: (jid
   );
 }
 
-function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAChat; liveTick: number; onBack: () => void }) {
+function Conversation({
+  jid, chat, allChats, liveTick, onBack,
+}: { jid: string; chat?: WAChat; allChats: WAChat[]; liveTick: number; onBack: () => void }) {
   const [messages, setMessages] = useState<WAMessage[]>([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
+  const [forwardFor, setForwardFor] = useState<WAMessage | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [chatSearch, setChatSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const didInitialScroll = useRef(false);
   const phone = phoneFromJid(jid);
   const title = displayName(chat?.name, phone);
@@ -353,7 +407,8 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   }, [load, jid]);
 
   // INSTANT UPDATES: reload this conversation the moment the parent receives a
-  // realtime event (new/deleted message) so the open chat updates without delay.
+  // realtime event (new/deleted message, tick change, reaction) so the open
+  // chat updates without delay.
   useEffect(() => {
     if (liveTick > 0) load();
   }, [liveTick, load]);
@@ -363,6 +418,8 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   useEffect(() => {
     didInitialScroll.current = false;
     setReplyTo(null);
+    setSearchOpen(false);
+    setChatSearch("");
   }, [jid]);
 
   // Keep the newest message in view like WhatsApp: always land at the bottom when
@@ -384,6 +441,7 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     const body = text.trim();
     if (!body) return;
     setSending(true);
+    setSendError("");
     setText("");
     const quote = replyTo
       ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
@@ -392,8 +450,40 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
       await panel.post("/panel/send", { phone: phone.replace("+", ""), text: body, ...quote });
       setReplyTo(null);
       load();
-    } catch {
+    } catch (err: any) {
       setText(body);
+      setSendError(err?.message || "Failed to send");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function pickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const kind = file.type.startsWith("image/") ? "image"
+      : file.type.startsWith("video/") ? "video"
+      : file.type.startsWith("audio/") ? "audio" : "document";
+    setSending(true);
+    setSendError("");
+    const form = new FormData();
+    form.append("file", file);
+    form.append("phone", phone.replace("+", ""));
+    form.append("kind", kind);
+    if (text.trim()) form.append("caption", text.trim());
+    if (replyTo) {
+      form.append("quotedId", replyTo.waMessageId);
+      form.append("quotedFromMe", String(replyTo.fromMe));
+      form.append("quotedText", replyTo.text);
+    }
+    try {
+      await panel.postForm("/panel/send-media", form);
+      setText("");
+      setReplyTo(null);
+      load();
+    } catch (err: any) {
+      setSendError(err?.message || "Failed to send file");
     } finally {
       setSending(false);
     }
@@ -407,6 +497,44 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     } catch {}
   }
 
+  async function hideForMe(msg: WAMessage) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/hide`);
+      load();
+    } catch {}
+  }
+
+  async function toggleStar(msg: WAMessage) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/star`, { starred: !msg.starred });
+      load();
+    } catch {}
+  }
+
+  async function react(msg: WAMessage, emoji: string) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/react`, {
+        emoji, fromMe: msg.fromMe,
+      });
+      load();
+    } catch {}
+  }
+
+  async function forwardTo(toJid: string) {
+    if (!forwardFor) return;
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(forwardFor.waMessageId)}/forward`, { toJid });
+    } catch {}
+    setForwardFor(null);
+  }
+
+  const visibleMessages = chatSearch.trim()
+    ? messages.filter((m) => m.text.toLowerCase().includes(chatSearch.toLowerCase()))
+    : messages;
+
   return (
     <div className="h-[100dvh] bg-background flex flex-col max-w-md mx-auto">
       {/* Conversation header — sidebar hidden, back button shown */}
@@ -414,19 +542,38 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
         <button onClick={onBack} className="p-1">
           <ChevronLeft className="w-6 h-6" />
         </button>
-        <div className="w-9 h-9 rounded-full bg-white/15 flex items-center justify-center font-semibold shrink-0">
-          {chat?.name ? chat.name.charAt(0).toUpperCase() : "?"}
-        </div>
+        <Avatar url={chat?.avatarUrl} label={title} size={36} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold leading-tight truncate">{title}</p>
         </div>
-        <MoreVertical className="w-5 h-5" />
+        <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
+          <Search className="w-5 h-5" />
+        </button>
       </header>
+
+      {/* In-chat search */}
+      {searchOpen && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-wa-panel border-b border-border shrink-0">
+          <Search className="w-4 h-4 text-muted-foreground shrink-0" />
+          <input
+            autoFocus
+            value={chatSearch}
+            onChange={(e) => setChatSearch(e.target.value)}
+            placeholder="Search in this chat"
+            className="flex-1 bg-transparent outline-none text-sm"
+          />
+          <button onClick={() => { setSearchOpen(false); setChatSearch(""); }} aria-label="Close search">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto wa-scroll wa-chat-bg px-3 py-4 space-y-1.5">
-        {messages.map((m) => (
-          <div key={m.waMessageId} className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
+        {visibleMessages.map((m) => {
+          const oldNoRead = m.fromMe && !m.deleted && m.status === 2 && Date.now() - m.ts > 24 * 3600 * 1000;
+          return (
+          <div key={m.waMessageId} className={`flex flex-col ${m.fromMe ? "items-end" : "items-start"}`}>
             <div
               onClick={() => !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
               className={`relative max-w-[78%] rounded-lg px-3 py-1.5 text-sm shadow-sm ${
@@ -437,6 +584,12 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
                 <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
               ) : (
                 <>
+                  {(m.viewOnce || m.ephemeral) && (
+                    <div className="flex items-center gap-1 mb-1 text-[10px] text-muted-foreground italic">
+                      {m.viewOnce && <><CircleDashed className="w-3 h-3" /> View once</>}
+                      {m.ephemeral && <><Timer className="w-3 h-3" /> Disappearing</>}
+                    </div>
+                  )}
                   {m.quotedText && (
                     <div className="mb-1 border-l-2 border-primary pl-2 text-xs text-muted-foreground line-clamp-2">
                       {m.quotedText}
@@ -452,40 +605,85 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
                   ) : (
                     <span className="whitespace-pre-wrap break-words">{m.text}</span>
                   )}
+                  {m.linkPreviewUrl && (
+                    <a
+                      href={m.linkPreviewUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="block mt-1.5 rounded-md overflow-hidden border border-border/50 bg-black/5"
+                    >
+                      {m.linkPreviewThumb && (
+                        <img src={`data:image/jpeg;base64,${m.linkPreviewThumb}`} alt="" className="w-full max-h-40 object-cover" />
+                      )}
+                      <div className="px-2 py-1.5">
+                        {m.linkPreviewTitle && <p className="text-xs font-semibold truncate">{m.linkPreviewTitle}</p>}
+                        {m.linkPreviewDescription && (
+                          <p className="text-[11px] text-muted-foreground line-clamp-2">{m.linkPreviewDescription}</p>
+                        )}
+                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">{m.linkPreviewUrl}</p>
+                      </div>
+                    </a>
+                  )}
                 </>
               )}
-              <span className="float-right ml-2 mt-1 flex items-center gap-0.5 text-[10px] text-muted-foreground translate-y-0.5">
+              <span className="float-right ml-2 mt-1 flex items-center gap-1 text-[10px] text-muted-foreground translate-y-0.5">
+                {m.starred && <Star className="w-3 h-3 fill-current" />}
+                {m.edited && !m.deleted && <span className="italic">edited</span>}
                 {fmtClock(m.ts)}
                 {m.fromMe && !m.deleted && (
-                  m.status >= 3 ? <CheckCheck className="w-3.5 h-3.5 text-sky-400" /> :
-                  m.status === 2 ? <CheckCheck className="w-3.5 h-3.5" /> :
-                  <Check className="w-3.5 h-3.5" />
+                  <span title={oldNoRead ? "Read receipts might be off for this contact" : undefined}>
+                    {m.status >= 3 ? <CheckCheck className="w-3.5 h-3.5 text-sky-400" /> :
+                     m.status === 2 ? <CheckCheck className="w-3.5 h-3.5" /> :
+                     <Check className="w-3.5 h-3.5" />}
+                  </span>
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[110px]">
-                  <button
-                    onClick={() => { setReplyTo(m); setMenuFor(null); }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent"
-                  >
+                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]">
+                  <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
+                    {QUICK_EMOJIS.map((em) => (
+                      <button key={em} onClick={() => react(m, em)} className="text-lg hover:scale-125 transition p-0.5">{em}</button>
+                    ))}
+                  </div>
+                  <button onClick={() => { setReplyTo(m); setMenuFor(null); }} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
                     <Reply className="w-3.5 h-3.5" /> Reply
                   </button>
+                  <button onClick={() => toggleStar(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Star className="w-3.5 h-3.5" /> {m.starred ? "Unstar" : "Star"}
+                  </button>
+                  <button onClick={() => { setForwardFor(m); setMenuFor(null); }} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Forward className="w-3.5 h-3.5" /> Forward
+                  </button>
+                  <button onClick={() => hideForMe(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Trash2 className="w-3.5 h-3.5" /> Delete for me
+                  </button>
                   {m.fromMe && (
-                    <button
-                      onClick={() => del(m)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> Delete
+                    <button onClick={() => del(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent">
+                      <Trash2 className="w-3.5 h-3.5" /> Delete for everyone
                     </button>
                   )}
                 </div>
               )}
             </div>
+            {m.reactions?.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {m.reactions.map((r) => (
+                  <span
+                    key={r.emoji}
+                    className={`text-xs rounded-full px-1.5 py-0.5 border ${r.byMe ? "border-primary bg-primary/10" : "border-border bg-card"}`}
+                  >
+                    {r.emoji}{r.count > 1 ? ` ${r.count}` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-        ))}
-        {messages.length === 0 && (
+          );
+        })}
+        {visibleMessages.length === 0 && (
           <div className="text-center text-xs text-muted-foreground mt-10">
-            No messages yet. Say hello 👋
+            {chatSearch.trim() ? "No matching messages." : "No messages yet. Say hello 👋"}
           </div>
         )}
       </div>
@@ -503,8 +701,22 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
         </div>
       )}
 
+      {sendError && (
+        <p className="px-3 py-1 text-xs text-destructive bg-wa-panel shrink-0">{sendError}</p>
+      )}
+
       {/* Composer */}
       <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+        <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sending}
+          className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
+          aria-label="Attach media"
+        >
+          <Paperclip className="w-5 h-5" />
+        </button>
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -519,6 +731,48 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
           {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
         </button>
       </form>
+
+      {forwardFor && (
+        <ForwardSheet chats={allChats} onClose={() => setForwardFor(null)} onPick={forwardTo} />
+      )}
+    </div>
+  );
+}
+
+/** Pick a chat to forward a message's content to — WhatsApp-style contact/chat picker. */
+function ForwardSheet({ chats, onClose, onPick }: { chats: WAChat[]; onClose: () => void; onPick: (jid: string) => void }) {
+  const [search, setSearch] = useState("");
+  const filtered = chats.filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end justify-center max-w-md mx-auto">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative w-full bg-card rounded-t-2xl p-4 space-y-3 max-h-[70vh] flex flex-col animate-in slide-in-from-bottom duration-200">
+        <div className="flex items-center justify-between shrink-0">
+          <h3 className="font-semibold text-lg">Forward to…</h3>
+          <button onClick={onClose}><X className="w-5 h-5 text-muted-foreground" /></button>
+        </div>
+        <input
+          autoFocus
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search chats"
+          className="w-full rounded-full bg-background border border-border px-4 py-2 text-sm outline-none focus:border-primary shrink-0"
+        />
+        <div className="flex-1 overflow-y-auto wa-scroll -mx-4 px-4">
+          {filtered.map((c) => (
+            <button
+              key={c.jid}
+              onClick={() => onPick(c.jid)}
+              className="w-full flex items-center gap-3 py-2.5 text-left border-b border-border/40"
+            >
+              <Avatar url={c.avatarUrl} label={displayName(c.name, c.phone)} size={40} />
+              <span className="font-medium truncate">{displayName(c.name, c.phone)}</span>
+            </button>
+          ))}
+          {filtered.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No chats found.</p>}
+        </div>
+      </div>
     </div>
   );
 }

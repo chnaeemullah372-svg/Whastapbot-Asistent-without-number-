@@ -47,6 +47,16 @@ export const panel = {
     fetch(`${API}${url}`, { method: "PUT", headers: headers(panelAuth.get()), body: body ? JSON.stringify(body) : undefined }).then(handle),
   del: (url: string) => fetch(`${API}${url}`, { method: "DELETE", headers: headers(panelAuth.get()) }).then(handle),
   raw: (url: string) => fetch(`${API}${url}`, { headers: headers(panelAuth.get()) }),
+  /** Multipart upload (outgoing media / group icon) — no Content-Type header,
+   *  the browser sets the multipart boundary itself. */
+  postForm: (url: string, form: FormData) => {
+    const token = panelAuth.get();
+    return fetch(`${API}${url}`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: form,
+    }).then(handle);
+  },
   mediaUrl: (msgId: string) =>
     `${API}/panel/media/${encodeURIComponent(msgId)}?t=${encodeURIComponent(panelAuth.get() ?? "")}`,
   eventsUrl: () =>
@@ -87,6 +97,10 @@ export interface WAChat {
   unread: number;
   updatedAt: string;
   accountPhone: string | null;
+  pinned: boolean;
+  muted: boolean;
+  archived: boolean;
+  avatarUrl: string | null;
 }
 
 export interface WAAccount {
@@ -96,6 +110,12 @@ export interface WAAccount {
   lastConnectedAt: string;
   connectCount: number;
   chatCount: number;
+}
+
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  byMe: boolean;
 }
 
 export interface WAMessage {
@@ -114,6 +134,15 @@ export interface WAMessage {
   mediaMime: string | null;
   fileName: string | null;
   hasMedia: boolean;
+  starred: boolean;
+  edited: boolean;
+  viewOnce: boolean;
+  ephemeral: boolean;
+  linkPreviewUrl: string | null;
+  linkPreviewTitle: string | null;
+  linkPreviewDescription: string | null;
+  linkPreviewThumb: string | null;
+  reactions: MessageReaction[];
 }
 
 export interface WACallLog {
@@ -147,6 +176,7 @@ export interface StatusGroup {
   participant: string;
   phone: string;
   name: string | null;
+  avatarUrl: string | null;
   latestTs: number;
   count: number;
   items: StatusItem[];
@@ -168,6 +198,20 @@ export interface BackupMeta {
   messageCount: number;
   note?: string | null;
   createdAt: string;
+}
+
+export interface GroupParticipant {
+  jid: string;
+  admin: "admin" | "superadmin" | null;
+  name?: string;
+}
+
+export interface GroupInfo {
+  id: string;
+  subject: string;
+  description: string | null;
+  owner: string | null;
+  participants: GroupParticipant[];
 }
 
 export interface SessionInfo {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
+import { Avatar } from "@/components/avatar";
 import { panel, panelAuth, fmtTime, displayName, type WACallLog } from "@/lib/panelApi";
 import { PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, Phone, Info } from "lucide-react";
 
@@ -73,12 +74,9 @@ function CallRow({ c }: { c: WACallLog }) {
     c.outcome === "rejected" ? "Declined" :
     c.outcome === "accepted" ? "Answered" :
     c.outgoing ? "Outgoing" : "Incoming";
-  const initial = c.name ? c.name.charAt(0).toUpperCase() : "?";
   return (
     <div className="w-full flex items-center gap-3 px-4 py-3 border-b border-border/40">
-      <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-lg shrink-0">
-        {initial}
-      </div>
+      <Avatar label={label} size={48} textClassName="text-lg" />
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <span className={`font-medium truncate ${missed ? "text-destructive" : ""}`}>{label}</span>
