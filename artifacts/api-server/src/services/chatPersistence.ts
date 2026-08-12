@@ -236,8 +236,20 @@ export async function setStarred(waMessageId: string, starred: boolean) {
  *  Messages screen. */
 export async function getStarredMessages() {
   return db
-    .select()
+    .select({
+      id: waMessagesTable.id,
+      waMessageId: waMessagesTable.waMessageId,
+      jid: waMessagesTable.jid,
+      text: waMessagesTable.text,
+      fromMe: waMessagesTable.fromMe,
+      ts: waMessagesTable.ts,
+      mediaKind: waMessagesTable.mediaKind,
+      fileName: waMessagesTable.fileName,
+      hasMedia: sql<boolean>`(${waMessagesTable.media} IS NOT NULL)`,
+    })
     .from(waMessagesTable)
+    // Exclude the heavy base64 `media` column here — this can list starred
+    // photos/videos across many chats, callers fetch media on demand.
     .where(and(eq(waMessagesTable.starred, true), eq(waMessagesTable.hiddenForMe, false)))
     .orderBy(desc(waMessagesTable.ts));
 }

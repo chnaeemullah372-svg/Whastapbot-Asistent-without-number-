@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
+import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import { panel } from "@/lib/panelApi";
-import { Loader2, Save, User, Bell, DatabaseBackup, Globe, CalendarClock, Trash2, Info, Palette, Check } from "lucide-react";
+import { Loader2, Save, User, Bell, DatabaseBackup, Globe, CalendarClock, Trash2, Info, Palette, Check, Star, ChevronRight } from "lucide-react";
 import { getTheme, setTheme, THEMES, type ThemeId } from "@/lib/theme";
 
 interface Settings {
@@ -15,6 +16,7 @@ interface Settings {
 
 export default function SettingsPage() {
   const user = useRequirePanelAuth();
+  const [, navigate] = useLocation();
   const [s, setS] = useState<Settings>({});
   const [username, setUsername] = useState("");
   const [busy, setBusy] = useState(false);
@@ -161,6 +163,14 @@ export default function SettingsPage() {
         {error && <p className="text-xs text-destructive">{error}</p>}
 
         <div className="rounded-2xl bg-card border border-border divide-y divide-border">
+          <button onClick={() => navigate("/starred")} className="w-full flex items-center gap-3 p-4 text-left">
+            <Star className="w-5 h-5 text-primary shrink-0" />
+            <div className="flex-1">
+              <p className="text-sm font-medium">Starred Messages</p>
+              <p className="text-xs text-muted-foreground">Messages you've starred across all chats</p>
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+          </button>
           <button onClick={clearCache} className="w-full flex items-center gap-3 p-4 text-left">
             <Trash2 className="w-5 h-5 text-primary shrink-0" />
             <div className="flex-1">
