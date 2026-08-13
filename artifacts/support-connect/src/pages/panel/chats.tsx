@@ -1,14 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
+import { Avatar } from "@/components/avatar";
 import {
-  panel, panelAuth, fmtTime, fmtClock, phoneFromJid,
+  panel, panelAuth, fmtTime, fmtClock, phoneFromJid, displayName,
   type WAChat, type WAMessage, type WAStatus,
 } from "@/lib/panelApi";
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
-  MessageSquarePlus, X, Loader2, MoreVertical, Circle,
+  MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply, Star,
+  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic,
 } from "lucide-react";
+
+const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
 
@@ -37,7 +41,10 @@ function MediaContent({ msg }: { msg: WAMessage }) {
     return <audio src={url} controls className="max-w-[230px]" />;
   }
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 underline break-all">
+    // Download directly (like WhatsApp Web) instead of opening a new tab —
+    // most document types (xlsx, docx…) can't render in a browser tab anyway,
+    // which just leaves a confusing blank tab behind.
+    <a href={url} download={msg.fileName || "document"} className="flex items-center gap-1.5 underline break-all">
       📄 {msg.fileName || "Document"}
     </a>
   );
@@ -60,6 +67,16 @@ export default function Chats() {
   const [waStatus, setWaStatus] = useState<WAStatus>("disconnected");
   const [connChecked, setConnChecked] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [chatMenuFor, setChatMenuFor] = useState<string | null>(null);
+
+  async function toggleChatFlag(jid: string, flag: "pin" | "mute" | "archive", value: boolean) {
+    setChatMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${flag}`, { value });
+      loadChats();
+    } catch {}
+  }
 
   // A genuine 401 means the token was invalidated (e.g. password changed) — log
   // out. Any other failure (server restart, network blip) is transient: keep the
@@ -84,6 +101,7 @@ export default function Chats() {
   // A counter bumped on every realtime event; the open Conversation watches it
   // and reloads instantly so a new/deleted message shows without waiting on poll.
   const [liveTick, setLiveTick] = useState(0);
+  const [presenceByJid, setPresenceByJid] = useState<Record<string, { presence: string; lastSeen?: number }>>({});
 
   useEffect(() => {
     if (!user) return;
@@ -113,7 +131,17 @@ export default function Chats() {
     const es = new EventSource(panel.eventsUrl());
     es.addEventListener("message", bump);
     es.addEventListener("delete", bump);
+    // Sent/delivered/read (blue tick) changes — bump so the open conversation
+    // reloads and shows the updated tick instantly instead of waiting on poll.
+    es.addEventListener("status", bump);
     es.addEventListener("state", () => loadStatus());
+    // Online / typing / recording status for whichever chat is subscribed.
+    es.addEventListener("presence", (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        setPresenceByJid((prev) => ({ ...prev, [data.jid]: { presence: data.presence, lastSeen: data.lastSeen } }));
+      } catch {}
+    });
     return () => {
       if (debounce) clearTimeout(debounce);
       es.close();
@@ -144,18 +172,21 @@ export default function Chats() {
   }, [activeJid, loadChats]);
 
   // Individual chats only — exclude groups (@g.us) and status broadcasts
-  const filtered = chats.filter(
-    (c) =>
-      !c.jid.endsWith("@g.us") &&
-      c.jid !== "status@broadcast" &&
-      (c.name || "").toLowerCase().includes(search.toLowerCase()),
-  );
+  const individualChats = chats.filter((c) => !c.jid.endsWith("@g.us") && c.jid !== "status@broadcast");
+  const archivedCount = individualChats.filter((c) => c.archived).length;
+  const filtered = individualChats
+    .filter((c) => (showArchived ? c.archived : !c.archived))
+    .filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()))
+    // Pinned chats float to the top, exactly like WhatsApp; otherwise newest first.
+    .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.lastMsgTs - a.lastMsgTs));
 
   if (activeJid) {
     return (
       <Conversation
         jid={activeJid}
         chat={chats.find((c) => c.jid === activeJid)}
+        allChats={individualChats}
+        presence={presenceByJid[activeJid]}
         liveTick={liveTick}
         onBack={() => {
           // Prefer unwinding the history entry we pushed (so the device back
@@ -198,41 +229,72 @@ export default function Chats() {
           </div>
         </div>
 
+        {/* Archived toggle — mirrors WhatsApp's "Archived" row at the top of the list */}
+        {archivedCount > 0 && (
+          <button
+            onClick={() => setShowArchived((v) => !v)}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm border-b border-border/40 hover:bg-card/60 transition"
+          >
+            <Archive className="w-4 h-4 text-muted-foreground" />
+            {showArchived ? "Back to chats" : `Archived (${archivedCount})`}
+          </button>
+        )}
+
         {/* Chat list */}
         <div className="flex-1 overflow-y-auto wa-scroll">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-8 text-muted-foreground">
               <MessageSquarePlus className="w-12 h-12 mb-3 opacity-40" />
-              <p className="text-sm">No chats yet.</p>
-              <p className="text-xs mt-1">Start a new conversation with the button below.</p>
+              <p className="text-sm">{showArchived ? "No archived chats." : "No chats yet."}</p>
+              {!showArchived && <p className="text-xs mt-1">Start a new conversation with the button below.</p>}
             </div>
           ) : (
             filtered.map((c) => (
-              <button
-                key={c.jid}
-                onClick={() => setActiveJid(c.jid)}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition text-left border-b border-border/40"
-              >
-                <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-lg shrink-0">
-                  {(c.name || c.phone).charAt(0).toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{c.name || c.phone}</span>
-                    <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
-                      {fmtTime(c.lastMsgTs)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 mt-0.5">
-                    <span className="text-sm text-muted-foreground truncate">{c.lastMsg}</span>
-                    {c.unread > 0 && (
-                      <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center">
-                        {c.unread}
+              <div key={c.jid} className="relative w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition border-b border-border/40">
+                <button onClick={() => setActiveJid(c.jid)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
+                  <Avatar url={c.avatarUrl} label={displayName(c.name, c.phone)} size={48} textClassName="text-lg" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium truncate flex items-center gap-1">
+                        {c.pinned && <Pin className="w-3 h-3 text-muted-foreground shrink-0" />}
+                        {c.muted && <BellOff className="w-3 h-3 text-muted-foreground shrink-0" />}
+                        {displayName(c.name, c.phone)}
                       </span>
-                    )}
+                      <span className={`text-xs shrink-0 ${c.unread ? "text-primary font-semibold" : "text-muted-foreground"}`}>
+                        {fmtTime(c.lastMsgTs)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                      <span className="text-sm text-muted-foreground truncate">{c.lastMsg}</span>
+                      {c.unread > 0 && (
+                        <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center">
+                          {c.unread}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </button>
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setChatMenuFor(chatMenuFor === c.jid ? null : c.jid); }}
+                  className="p-1 shrink-0 text-muted-foreground"
+                  aria-label="Chat options"
+                >
+                  <MoreVertical className="w-4 h-4" />
+                </button>
+                {chatMenuFor === c.jid && (
+                  <div className="absolute top-10 right-4 flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[160px] text-sm">
+                    <button onClick={() => toggleChatFlag(c.jid, "pin", !c.pinned)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <Pin className="w-3.5 h-3.5" /> {c.pinned ? "Unpin chat" : "Pin chat"}
+                    </button>
+                    <button onClick={() => toggleChatFlag(c.jid, "mute", !c.muted)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <BellOff className="w-3.5 h-3.5" /> {c.muted ? "Unmute" : "Mute notifications"}
+                    </button>
+                    <button onClick={() => toggleChatFlag(c.jid, "archive", !c.archived)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <Archive className="w-3.5 h-3.5" /> {c.archived ? "Unarchive" : "Archive chat"}
+                    </button>
+                  </div>
+                )}
+              </div>
             ))
           )}
         </div>
@@ -324,15 +386,34 @@ function NewChatSheet({ onClose, onStart }: { onClose: () => void; onStart: (jid
   );
 }
 
-function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAChat; liveTick: number; onBack: () => void }) {
+function Conversation({
+  jid, chat, allChats, presence, liveTick, onBack,
+}: {
+  jid: string; chat?: WAChat; allChats: WAChat[];
+  presence?: { presence: string; lastSeen?: number };
+  liveTick: number; onBack: () => void;
+}) {
   const [messages, setMessages] = useState<WAMessage[]>([]);
   const [text, setText] = useState("");
+  const wasComposing = useRef(false);
+  const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [sendError, setSendError] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
+  const [forwardFor, setForwardFor] = useState<WAMessage | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [chatSearch, setChatSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const didInitialScroll = useRef(false);
   const phone = phoneFromJid(jid);
-  const title = chat?.name || phone;
+  const title = displayName(chat?.name, phone);
 
   const load = useCallback(() => {
     panel.get(`/panel/chats/${encodeURIComponent(jid)}/messages`)
@@ -349,14 +430,27 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
   }, [load, jid]);
 
   // INSTANT UPDATES: reload this conversation the moment the parent receives a
-  // realtime event (new/deleted message) so the open chat updates without delay.
+  // realtime event (new/deleted message, tick change, reaction) so the open
+  // chat updates without delay.
   useEffect(() => {
     if (liveTick > 0) load();
   }, [liveTick, load]);
 
-  // Opening a different chat must re-jump to its newest message.
+  // Opening a different chat must re-jump to its newest message and drop any
+  // reply-to draft from the previous conversation.
   useEffect(() => {
     didInitialScroll.current = false;
+    setReplyTo(null);
+    setSearchOpen(false);
+    setChatSearch("");
+    // Never leave a recording running (or its mic stream open) behind when
+    // switching chats.
+    if (mediaRecorderRef.current) {
+      if (recordTimerRef.current) clearTimeout(recordTimerRef.current);
+      try { mediaRecorderRef.current.stop(); } catch {}
+      mediaRecorderRef.current = null;
+      setRecording(false);
+    }
   }, [jid]);
 
   // Keep the newest message in view like WhatsApp: always land at the bottom when
@@ -378,16 +472,140 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     const body = text.trim();
     if (!body) return;
     setSending(true);
+    setSendError("");
     setText("");
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    if (wasComposing.current) {
+      wasComposing.current = false;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+    }
+    const quote = replyTo
+      ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
+      : {};
     try {
-      await panel.post("/panel/send", { phone: phone.replace("+", ""), text: body });
+      // Send by full jid, not a reconstructed phone number — some contacts
+      // (WhatsApp's newer privacy "LID" addressing) have a jid that is NOT a
+      // real phone number at all; rebuilding "<phone>@s.whatsapp.net" from
+      // it would silently address the message to the wrong place.
+      await panel.post("/panel/send", { jid, text: body, ...quote });
+      setReplyTo(null);
       load();
-    } catch {
+    } catch (err: any) {
       setText(body);
+      setSendError(err?.message || "Failed to send");
     } finally {
       setSending(false);
     }
   }
+
+  async function pickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const kind = file.type.startsWith("image/") ? "image"
+      : file.type.startsWith("video/") ? "video"
+      : file.type.startsWith("audio/") ? "audio" : "document";
+    setSending(true);
+    setSendError("");
+    const form = new FormData();
+    form.append("file", file);
+    form.append("jid", jid);
+    form.append("kind", kind);
+    if (text.trim()) form.append("caption", text.trim());
+    if (replyTo) {
+      form.append("quotedId", replyTo.waMessageId);
+      form.append("quotedFromMe", String(replyTo.fromMe));
+      form.append("quotedText", replyTo.text);
+    }
+    try {
+      await panel.postForm("/panel/send-media", form);
+      setText("");
+      setReplyTo(null);
+      load();
+    } catch (err: any) {
+      setSendError(err?.message || "Failed to send file");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      mr.onstop = () => stream.getTracks().forEach((t) => t.stop());
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    } catch {
+      setSendError("Microphone access denied or unavailable");
+    }
+  }
+
+  async function stopRecording(shouldSend: boolean) {
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    setRecording(false);
+    await new Promise<void>((resolve) => {
+      mr.addEventListener("stop", () => resolve(), { once: true });
+      mr.stop();
+    });
+    mediaRecorderRef.current = null;
+    const chunks = recordChunksRef.current;
+    recordChunksRef.current = [];
+    if (!shouldSend || chunks.length === 0) return;
+    const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+    setSending(true);
+    setSendError("");
+    const form = new FormData();
+    form.append("file", blob, "voice-note.webm");
+    form.append("jid", jid);
+    form.append("kind", "audio");
+    if (replyTo) {
+      form.append("quotedId", replyTo.waMessageId);
+      form.append("quotedFromMe", String(replyTo.fromMe));
+      form.append("quotedText", replyTo.text);
+    }
+    try {
+      await panel.postForm("/panel/send-media", form);
+      setReplyTo(null);
+      load();
+    } catch (err: any) {
+      setSendError(err?.message || "Failed to send voice message");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  // Tell WhatsApp we're composing a reply (debounced) — real WhatsApp Web
+  // sends this as you type and "paused" a moment after you stop.
+  function onTypingChange(value: string) {
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    if (value.trim() && !wasComposing.current) {
+      wasComposing.current = true;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: true }).catch(() => {});
+    }
+    typingTimeout.current = setTimeout(() => {
+      wasComposing.current = false;
+      panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+    }, 3000);
+  }
+
+  // Stop signalling "typing" the moment we leave this chat.
+  useEffect(() => {
+    return () => {
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      if (wasComposing.current) {
+        wasComposing.current = false;
+        panel.post(`/panel/chats/${encodeURIComponent(jid)}/typing`, { composing: false }).catch(() => {});
+      }
+    };
+  }, [jid]);
 
   async function del(msg: WAMessage) {
     setMenuFor(null);
@@ -397,6 +615,51 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
     } catch {}
   }
 
+  async function hideForMe(msg: WAMessage) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/hide`);
+      load();
+    } catch {}
+  }
+
+  async function toggleStar(msg: WAMessage) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/star`, { starred: !msg.starred });
+      load();
+    } catch {}
+  }
+
+  async function react(msg: WAMessage, emoji: string) {
+    setMenuFor(null);
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/react`, {
+        emoji, fromMe: msg.fromMe,
+      });
+      load();
+    } catch {}
+  }
+
+  async function forwardTo(toJid: string) {
+    if (!forwardFor) return;
+    try {
+      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(forwardFor.waMessageId)}/forward`, { toJid });
+    } catch {}
+    setForwardFor(null);
+  }
+
+  const visibleMessages = chatSearch.trim()
+    ? messages.filter((m) => m.text.toLowerCase().includes(chatSearch.toLowerCase()))
+    : messages;
+
+  const presenceLabel =
+    presence?.presence === "composing" ? "typing…" :
+    presence?.presence === "recording" ? "recording audio…" :
+    presence?.presence === "available" ? "online" :
+    presence?.lastSeen ? `last seen ${fmtTime(presence.lastSeen)}` :
+    null;
+
   return (
     <div className="h-[100dvh] bg-background flex flex-col max-w-md mx-auto">
       {/* Conversation header — sidebar hidden, back button shown */}
@@ -404,21 +667,45 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
         <button onClick={onBack} className="p-1">
           <ChevronLeft className="w-6 h-6" />
         </button>
-        <div className="w-9 h-9 rounded-full bg-white/15 flex items-center justify-center font-semibold shrink-0">
-          {(chat?.name || phone).charAt(0).toUpperCase()}
-        </div>
+        <Avatar url={chat?.avatarUrl} label={title} size={36} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold leading-tight truncate">{title}</p>
+          {presenceLabel && (
+            <p className={`text-[11px] leading-tight truncate ${presenceLabel === "typing…" ? "text-emerald-300" : "text-white/60"}`}>
+              {presenceLabel}
+            </p>
+          )}
         </div>
-        <MoreVertical className="w-5 h-5" />
+        <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
+          <Search className="w-5 h-5" />
+        </button>
       </header>
+
+      {/* In-chat search */}
+      {searchOpen && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-wa-panel border-b border-border shrink-0">
+          <Search className="w-4 h-4 text-muted-foreground shrink-0" />
+          <input
+            autoFocus
+            value={chatSearch}
+            onChange={(e) => setChatSearch(e.target.value)}
+            placeholder="Search in this chat"
+            className="flex-1 bg-transparent outline-none text-sm"
+          />
+          <button onClick={() => { setSearchOpen(false); setChatSearch(""); }} aria-label="Close search">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto wa-scroll wa-chat-bg px-3 py-4 space-y-1.5">
-        {messages.map((m) => (
-          <div key={m.waMessageId} className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
+        {visibleMessages.map((m) => {
+          const oldNoRead = m.fromMe && !m.deleted && m.status === 2 && Date.now() - m.ts > 24 * 3600 * 1000;
+          return (
+          <div key={m.waMessageId} className={`flex flex-col ${m.fromMe ? "items-end" : "items-start"}`}>
             <div
-              onClick={() => m.fromMe && !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
+              onClick={() => !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
               className={`relative max-w-[78%] rounded-lg px-3 py-1.5 text-sm shadow-sm ${
                 m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
               }`}
@@ -427,6 +714,12 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
                 <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
               ) : (
                 <>
+                  {(m.viewOnce || m.ephemeral) && (
+                    <div className="flex items-center gap-1 mb-1 text-[10px] text-muted-foreground italic">
+                      {m.viewOnce && <><CircleDashed className="w-3 h-3" /> View once</>}
+                      {m.ephemeral && <><Timer className="w-3 h-3" /> Disappearing</>}
+                    </div>
+                  )}
                   {m.quotedText && (
                     <div className="mb-1 border-l-2 border-primary pl-2 text-xs text-muted-foreground line-clamp-2">
                       {m.quotedText}
@@ -442,50 +735,214 @@ function Conversation({ jid, chat, liveTick, onBack }: { jid: string; chat?: WAC
                   ) : (
                     <span className="whitespace-pre-wrap break-words">{m.text}</span>
                   )}
+                  {m.linkPreviewUrl && (
+                    <a
+                      href={m.linkPreviewUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="block mt-1.5 rounded-md overflow-hidden border border-border/50 bg-black/5"
+                    >
+                      {m.linkPreviewThumb && (
+                        <img src={`data:image/jpeg;base64,${m.linkPreviewThumb}`} alt="" className="w-full max-h-40 object-cover" />
+                      )}
+                      <div className="px-2 py-1.5">
+                        {m.linkPreviewTitle && <p className="text-xs font-semibold truncate">{m.linkPreviewTitle}</p>}
+                        {m.linkPreviewDescription && (
+                          <p className="text-[11px] text-muted-foreground line-clamp-2">{m.linkPreviewDescription}</p>
+                        )}
+                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">{m.linkPreviewUrl}</p>
+                      </div>
+                    </a>
+                  )}
                 </>
               )}
-              <span className="float-right ml-2 mt-1 flex items-center gap-0.5 text-[10px] text-muted-foreground translate-y-0.5">
+              <span className="float-right ml-2 mt-1 flex items-center gap-1 text-[10px] text-muted-foreground translate-y-0.5">
+                {m.starred && <Star className="w-3 h-3 fill-current" />}
+                {m.edited && !m.deleted && <span className="italic">edited</span>}
                 {fmtClock(m.ts)}
                 {m.fromMe && !m.deleted && (
-                  m.status >= 3 ? <CheckCheck className="w-3.5 h-3.5 text-sky-400" /> :
-                  m.status === 2 ? <CheckCheck className="w-3.5 h-3.5" /> :
-                  <Check className="w-3.5 h-3.5" />
+                  <span title={oldNoRead ? "Read receipts might be off for this contact" : undefined}>
+                    {m.status >= 3 ? <CheckCheck className="w-3.5 h-3.5 text-sky-400" /> :
+                     m.status === 2 ? <CheckCheck className="w-3.5 h-3.5" /> :
+                     <Check className="w-3.5 h-3.5" />}
+                  </span>
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <button
-                  onClick={() => del(m)}
-                  className="absolute -top-2 right-0 translate-y-[-100%] flex items-center gap-1.5 bg-popover border border-border rounded-lg px-3 py-1.5 text-xs text-destructive shadow-lg z-10"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>
+                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]">
+                  <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
+                    {QUICK_EMOJIS.map((em) => (
+                      <button key={em} onClick={() => react(m, em)} className="text-lg hover:scale-125 transition p-0.5">{em}</button>
+                    ))}
+                  </div>
+                  <button onClick={() => { setReplyTo(m); setMenuFor(null); }} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Reply className="w-3.5 h-3.5" /> Reply
+                  </button>
+                  <button onClick={() => toggleStar(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Star className="w-3.5 h-3.5" /> {m.starred ? "Unstar" : "Star"}
+                  </button>
+                  <button onClick={() => { setForwardFor(m); setMenuFor(null); }} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Forward className="w-3.5 h-3.5" /> Forward
+                  </button>
+                  <button onClick={() => hideForMe(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left hover:bg-accent">
+                    <Trash2 className="w-3.5 h-3.5" /> Delete for me
+                  </button>
+                  {m.fromMe && (
+                    <button onClick={() => del(m)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent">
+                      <Trash2 className="w-3.5 h-3.5" /> Delete for everyone
+                    </button>
+                  )}
+                </div>
               )}
             </div>
+            {m.reactions?.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {m.reactions.map((r) => (
+                  <span
+                    key={r.emoji}
+                    className={`text-xs rounded-full px-1.5 py-0.5 border ${r.byMe ? "border-primary bg-primary/10" : "border-border bg-card"}`}
+                  >
+                    {r.emoji}{r.count > 1 ? ` ${r.count}` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-        ))}
-        {messages.length === 0 && (
+          );
+        })}
+        {visibleMessages.length === 0 && (
           <div className="text-center text-xs text-muted-foreground mt-10">
-            No messages yet. Say hello 👋
+            {chatSearch.trim() ? "No matching messages." : "No messages yet. Say hello 👋"}
           </div>
         )}
       </div>
 
+      {/* Reply-to preview */}
+      {replyTo && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-wa-panel border-t border-border shrink-0">
+          <div className="flex-1 min-w-0 border-l-2 border-primary pl-2">
+            <p className="text-xs font-medium text-primary truncate">{replyTo.fromMe ? "You" : title}</p>
+            <p className="text-xs text-muted-foreground truncate">{replyTo.text}</p>
+          </div>
+          <button type="button" onClick={() => setReplyTo(null)} className="p-1 shrink-0" aria-label="Cancel reply">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+
+      {sendError && (
+        <p className="px-3 py-1 text-xs text-destructive bg-wa-panel shrink-0">{sendError}</p>
+      )}
+
       {/* Composer */}
-      <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+      {recording ? (
+        <div className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <button
+            type="button"
+            onClick={() => stopRecording(false)}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-destructive hover:bg-card transition"
+            aria-label="Cancel recording"
+          >
+            <Trash2 className="w-5 h-5" />
+          </button>
+          <div className="flex-1 flex items-center gap-2 px-4">
+            <span className="w-2.5 h-2.5 rounded-full bg-destructive animate-pulse" />
+            <span className="text-sm tabular-nums">
+              {String(Math.floor(recordSeconds / 60)).padStart(2, "0")}:{String(recordSeconds % 60).padStart(2, "0")}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => stopRecording(true)}
+            disabled={sending}
+            className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            aria-label="Send voice message"
+          >
+            {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
+            aria-label="Attach media"
+          >
+            <Paperclip className="w-5 h-5" />
+          </button>
+          <input
+            value={text}
+            onChange={(e) => { setText(e.target.value); onTypingChange(e.target.value); }}
+            placeholder="Type a message"
+            className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+          />
+          {text.trim() ? (
+            <button
+              type="submit"
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            >
+              {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={startRecording}
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+              aria-label="Record voice message"
+            >
+              <Mic className="w-5 h-5" />
+            </button>
+          )}
+        </form>
+      )}
+
+      {forwardFor && (
+        <ForwardSheet chats={allChats} onClose={() => setForwardFor(null)} onPick={forwardTo} />
+      )}
+    </div>
+  );
+}
+
+/** Pick a chat to forward a message's content to — WhatsApp-style contact/chat picker. */
+function ForwardSheet({ chats, onClose, onPick }: { chats: WAChat[]; onClose: () => void; onPick: (jid: string) => void }) {
+  const [search, setSearch] = useState("");
+  const filtered = chats.filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end justify-center max-w-md mx-auto">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative w-full bg-card rounded-t-2xl p-4 space-y-3 max-h-[70vh] flex flex-col animate-in slide-in-from-bottom duration-200">
+        <div className="flex items-center justify-between shrink-0">
+          <h3 className="font-semibold text-lg">Forward to…</h3>
+          <button onClick={onClose}><X className="w-5 h-5 text-muted-foreground" /></button>
+        </div>
         <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Type a message"
-          className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+          autoFocus
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search chats"
+          className="w-full rounded-full bg-background border border-border px-4 py-2 text-sm outline-none focus:border-primary shrink-0"
         />
-        <button
-          type="submit"
-          disabled={sending || !text.trim()}
-          className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
-        >
-          {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-        </button>
-      </form>
+        <div className="flex-1 overflow-y-auto wa-scroll -mx-4 px-4">
+          {filtered.map((c) => (
+            <button
+              key={c.jid}
+              onClick={() => onPick(c.jid)}
+              className="w-full flex items-center gap-3 py-2.5 text-left border-b border-border/40"
+            >
+              <Avatar url={c.avatarUrl} label={displayName(c.name, c.phone)} size={40} />
+              <span className="font-medium truncate">{displayName(c.name, c.phone)}</span>
+            </button>
+          ))}
+          {filtered.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No chats found.</p>}
+        </div>
+      </div>
     </div>
   );
 }
