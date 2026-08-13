@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
-import { panel, panelAuth, fmtTime, fmtClock, type StatusGroup } from "@/lib/panelApi";
+import { Avatar } from "@/components/avatar";
+import { panel, panelAuth, fmtTime, fmtClock, displayName, type StatusGroup } from "@/lib/panelApi";
 import { CircleDashed, X } from "lucide-react";
 
 // Some text rows are just emoji placeholders the engine stores for media-only
@@ -59,18 +60,15 @@ export default function Status() {
                 Recent updates
               </p>
               {groups.map((g) => {
-                const label = g.name || g.phone;
-                const initial = label.charAt(0).toUpperCase();
+                const label = displayName(g.name, g.phone);
                 return (
                   <button
                     key={g.participant}
                     onClick={() => setActive(g)}
                     className="w-full flex items-center gap-3 px-4 py-3 hover:bg-card/60 transition text-left border-b border-border/40"
                   >
-                    <div className="w-12 h-12 rounded-full ring-2 ring-primary p-0.5 shrink-0">
-                      <div className="w-full h-full rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold">
-                        {initial}
-                      </div>
+                    <div className="rounded-full ring-2 ring-primary p-0.5 shrink-0">
+                      <Avatar url={g.avatarUrl} label={label} size={44} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <span className="font-medium truncate block">{label}</span>
@@ -101,8 +99,7 @@ function StatusViewer({ group, onClose }: { group: StatusGroup; onClose: () => v
   }, [items.length, onClose]);
 
   if (!item) return null;
-  const label = group.name || group.phone;
-  const initial = label.charAt(0).toUpperCase();
+  const label = displayName(group.name, group.phone);
   const url = panel.mediaUrl(item.waMessageId);
   const next = () => (idx < items.length - 1 ? setIdx(idx + 1) : onClose());
   const prev = () => idx > 0 && setIdx(idx - 1);
@@ -118,9 +115,7 @@ function StatusViewer({ group, onClose }: { group: StatusGroup; onClose: () => v
       </div>
       {/* header */}
       <div className="flex items-center gap-3 px-4 py-2 text-white shrink-0">
-        <div className="w-9 h-9 rounded-full bg-white/15 flex items-center justify-center font-semibold">
-          {initial}
-        </div>
+        <Avatar url={group.avatarUrl} label={label} size={36} />
         <div className="flex-1 min-w-0">
           <p className="font-medium truncate">{label}</p>
           <p className="text-xs text-white/60">{fmtClock(item.ts)}</p>
