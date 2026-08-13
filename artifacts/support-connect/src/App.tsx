@@ -16,6 +16,7 @@ import Logs from "@/pages/panel/logs";
 import Help from "@/pages/panel/help";
 import Calls from "@/pages/panel/calls";
 import Status from "@/pages/panel/status";
+import Starred from "@/pages/panel/starred";
 
 import AdminLogin from "@/pages/adminpanel/login";
 import AdminDashboard from "@/pages/adminpanel/dashboard";
@@ -41,6 +42,7 @@ function Router() {
       <Route path="/calls" component={Calls} />
       <Route path="/status" component={Status} />
       <Route path="/groups" component={Groups} />
+      <Route path="/starred" component={Starred} />
       <Route path="/" component={Chats} />
 
       <Route component={NotFound} />
