@@ -6,7 +6,7 @@ import {
   Download, RefreshCw, Wrench, Trash2, CheckCircle2, XCircle, Eye, EyeOff,
   Loader2, Activity, Power, LayoutDashboard, MessagesSquare, HardDrive,
   Database, ScrollText, Menu, X, Circle, Search, ChevronLeft, Crown, KeyRound,
-  Smartphone, CalendarClock,
+  Smartphone, CalendarClock, UserPlus,
 } from "lucide-react";
 import { isVip, setVip } from "@/lib/theme";
 
@@ -70,6 +70,11 @@ export default function AdminDashboard() {
   const [drawer, setDrawer] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<PanelUser[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
+  const [newUsername, setNewUsername] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createMsg, setCreateMsg] = useState("");
   const [messages, setMessages] = useState<(WAMessage & { _chat?: string })[]>([]);
   const [logs, setLogs] = useState<AppLog[]>([]);
   const [chats, setChats] = useState<WAChat[]>([]);
@@ -77,7 +82,7 @@ export default function AdminDashboard() {
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<WAChat | null>(null);
   const [chatMessages, setChatMessages] = useState<WAMessage[]>([]);
-  const [showPw, setShowPw] = useState(false);
+  const [showPw, setShowPw] = useState<Record<number, boolean>>({});
   const [adminName, setAdminName] = useState("");
   const [vip, setVipState] = useState(isVip());
   const [toolMsg, setToolMsg] = useState("");
@@ -86,31 +91,49 @@ export default function AdminDashboard() {
   const [brandMsg, setBrandMsg] = useState("");
   const [brandBusy, setBrandBusy] = useState(false);
 
+  // Which account's WhatsApp/chats the oversight views (Dashboard, Connected
+  // Numbers, All Chats, Live Messages) are currently showing.
+  const userIdQS = selectedUserId ? `?userId=${selectedUserId}` : "";
+  const withUserId = (url: string) => url + (userIdQS ? (url.includes("?") ? `&userId=${selectedUserId}` : userIdQS) : "");
+
   const loadAll = useCallback(async () => {
     try {
-      const [st, us, lg, ch, ac] = await Promise.all([
-        admin.get("/admin-panel/stats"),
-        admin.get("/admin-panel/users"),
-        admin.get("/admin-panel/logs?limit=120"),
-        admin.get("/admin-panel/chats"),
-        admin.get("/admin-panel/accounts"),
-      ]);
-      setStats(st);
-      setUsers(Array.isArray(us) ? us : []);
-      setLogs(lg || []);
-      setChats(ch || []);
-      setAccounts(ac || []);
-      const recent: (WAMessage & { _chat?: string })[] = [];
-      for (const c of (ch || []).slice(0, 10)) {
-        const msgs: WAMessage[] = await admin.get(`/admin-panel/chats/${encodeURIComponent(c.jid)}/messages`);
-        msgs.slice(-6).forEach((m) => recent.push({ ...m, _chat: c.name || c.phone }));
-      }
-      recent.sort((a, b) => b.ts - a.ts);
-      setMessages(recent.slice(0, 40));
+      const us: PanelUser[] = await admin.get("/admin-panel/users");
+      setUsers(us || []);
+      setSelectedUserId((prev) => (prev && us.some((u) => u.id === prev)) ? prev : (us[0]?.id ?? null));
     } catch (e: any) {
-      if (String(e.message).includes("401")) logout();
+      if (String(e.message).includes("401")) { logout(); return; }
     }
   }, []);
+
+  // Reload account-scoped data whenever the selected account changes.
+  useEffect(() => {
+    if (!selectedUserId) return;
+    (async () => {
+      try {
+        const [st, lg, ch, ac] = await Promise.all([
+          admin.get(withUserId("/admin-panel/stats")),
+          admin.get("/admin-panel/logs?limit=120"),
+          admin.get(withUserId("/admin-panel/chats")),
+          admin.get(withUserId("/admin-panel/accounts")),
+        ]);
+        setStats(st);
+        setLogs(lg || []);
+        setChats(ch || []);
+        setAccounts(ac || []);
+        const recent: (WAMessage & { _chat?: string })[] = [];
+        for (const c of (ch || []).slice(0, 10)) {
+          const msgs: WAMessage[] = await admin.get(withUserId(`/admin-panel/chats/${encodeURIComponent(c.jid)}/messages`));
+          msgs.slice(-6).forEach((m) => recent.push({ ...m, _chat: c.name || c.phone }));
+        }
+        recent.sort((a, b) => b.ts - a.ts);
+        setMessages(recent.slice(0, 40));
+      } catch (e: any) {
+        if (String(e.message).includes("401")) logout();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedUserId]);
 
   useEffect(() => {
     if (!adminAuth.get()) {
@@ -128,7 +151,7 @@ export default function AdminDashboard() {
     setActiveChat(c);
     setChatMessages([]);
     try {
-      const msgs: WAMessage[] = await admin.get(`/admin-panel/chats/${encodeURIComponent(c.jid)}/messages`);
+      const msgs: WAMessage[] = await admin.get(withUserId(`/admin-panel/chats/${encodeURIComponent(c.jid)}/messages`));
       setChatMessages(msgs);
     } catch {
       setChatMessages([]);
@@ -140,24 +163,46 @@ export default function AdminDashboard() {
     if (!activeChat) return;
     const jid = activeChat.jid;
     const refetch = () => {
-      admin.get(`/admin-panel/chats/${encodeURIComponent(jid)}/messages`)
+      admin.get(withUserId(`/admin-panel/chats/${encodeURIComponent(jid)}/messages`))
         .then((msgs: WAMessage[]) => setChatMessages(msgs))
         .catch(() => {});
     };
     const t = setInterval(refetch, 3000);
     return () => clearInterval(t);
-  }, [activeChat]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChat, selectedUserId]);
 
   function logout() {
     adminAuth.clear();
     navigate("/admin/login");
   }
 
-  async function approve(userId: number) { await admin.post("/admin-panel/user/approve", { userId }); loadAll(); }
-  async function revoke(userId: number) { await admin.post("/admin-panel/user/revoke", { userId }); loadAll(); }
-  async function deleteUser(userId: number) {
-    if (!window.confirm("Is user ko delete karen?")) return;
-    await admin.del(`/admin-panel/user/${userId}`).catch(() => {});
+  async function createUser(e: React.FormEvent) {
+    e.preventDefault();
+    setCreateMsg("");
+    if (newUsername.trim().length < 3 || newPassword.length < 4) {
+      setCreateMsg("Username (3+) aur password (4+) chahiye.");
+      return;
+    }
+    setCreateBusy(true);
+    try {
+      await admin.post("/admin-panel/users", { username: newUsername.trim(), password: newPassword });
+      setNewUsername("");
+      setNewPassword("");
+      setCreateMsg("Account ban gaya ✓");
+      loadAll();
+    } catch (e: any) {
+      setCreateMsg(e?.message || "Account nahi bana.");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
+  async function approveUser(id: number) { await admin.post(`/admin-panel/users/${id}/approve`); loadAll(); }
+  async function revokeUser(id: number) { await admin.post(`/admin-panel/users/${id}/revoke`); loadAll(); }
+  async function deleteUser(id: number, username: string) {
+    if (!confirm(`Delete account "${username}"? This disconnects its WhatsApp and removes its login.`)) return;
+    await admin.del(`/admin-panel/users/${id}`);
     loadAll();
   }
 
@@ -179,7 +224,7 @@ export default function AdminDashboard() {
   async function runTool(path: string, label: string) {
     setToolMsg("");
     try {
-      await admin.post(`/admin-panel/tools/${path}`);
+      await admin.post(`/admin-panel/tools/${path}`, selectedUserId ? { userId: selectedUserId } : undefined);
       setToolMsg(`${label} completed.`);
       loadAll();
     } catch (e: any) {
@@ -271,6 +316,18 @@ export default function AdminDashboard() {
             <h1 className="text-lg font-bold leading-tight">{NAV.find((n) => n.key === view)?.label}</h1>
             <p className="text-xs text-muted-foreground">Signed in as {adminName || "admin"}</p>
           </div>
+          {users.length > 1 && (
+            <select
+              value={selectedUserId ?? ""}
+              onChange={(e) => setSelectedUserId(Number(e.target.value))}
+              title="Viewing account"
+              className="text-sm bg-muted hover:bg-muted/70 transition px-3 py-2 rounded-lg outline-none max-w-[9rem] sm:max-w-none truncate"
+            >
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>{u.username}</option>
+              ))}
+            </select>
+          )}
           <button
             onClick={() => { const v = !vip; setVip(v); setVipState(v); }}
             title="VIP Theme"
@@ -330,55 +387,73 @@ export default function AdminDashboard() {
 
           {view === "users" && (
             <div className="max-w-2xl space-y-4">
-              <Card title={`Panel Users (${users.length})`} icon={Users}>
+              <Card title="Create Account" icon={UserPlus}>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Admin-created accounts are auto-approved and get their own isolated WhatsApp connection + chats immediately.
+                </p>
+                <form onSubmit={createUser} className="space-y-3">
+                  <input
+                    value={newUsername}
+                    onChange={(e) => setNewUsername(e.target.value)}
+                    placeholder="Username"
+                    className="w-full rounded-lg bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+                  />
+                  <input
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Password"
+                    className="w-full rounded-lg bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+                  />
+                  <button
+                    type="submit"
+                    disabled={createBusy}
+                    className="w-full rounded-lg bg-primary text-primary-foreground text-sm font-semibold py-2.5 flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    {createBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+                    Create Account
+                  </button>
+                  {createMsg && <p className="text-xs text-center text-muted-foreground">{createMsg}</p>}
+                </form>
+              </Card>
+
+              <Card title={`Panel Accounts (${users.length})`} icon={Users}>
                 {users.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Koi user abhi signup nahi kiya.</p>
+                  <p className="text-sm text-muted-foreground">No accounts yet — no one has signed up.</p>
                 ) : (
                   <div className="space-y-3">
                     {users.map((u) => (
                       <div key={u.id} className="rounded-xl border border-border p-4 space-y-3">
                         <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center text-primary font-bold text-sm shrink-0">
-                              {u.username[0].toUpperCase()}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="font-semibold text-sm truncate">{u.username}</p>
-                              <p className="text-xs text-muted-foreground">{new Date(u.createdAt).toLocaleDateString()}</p>
-                            </div>
-                          </div>
+                          <p className="font-semibold truncate">{u.username}</p>
                           {u.approved ? (
-                            <span className="text-xs font-semibold text-primary flex items-center gap-1 shrink-0">
-                              <CheckCircle2 className="w-3.5 h-3.5" /> Approved
-                            </span>
+                            <span className="text-xs font-semibold text-primary flex items-center gap-1 shrink-0"><CheckCircle2 className="w-3.5 h-3.5" /> Approved</span>
                           ) : (
-                            <span className="text-xs font-semibold text-yellow-500 flex items-center gap-1 shrink-0">
-                              <XCircle className="w-3.5 h-3.5" /> Pending
-                            </span>
+                            <span className="text-xs font-semibold text-yellow-500 flex items-center gap-1 shrink-0"><XCircle className="w-3.5 h-3.5" /> Pending</span>
                           )}
                         </div>
                         <div>
-                          <p className="text-xs text-muted-foreground mb-0.5">Password</p>
-                          <div className="flex items-center gap-2">
+                          <p className="text-xs text-muted-foreground">Password</p>
+                          <div className="flex items-center gap-2 mt-0.5">
                             <code className="text-sm font-mono bg-muted px-2 py-1 rounded flex-1">
-                              {showPw ? u.password : "••••••••"}
+                              {showPw[u.id] ? u.password : "••••••••"}
                             </code>
-                            <button onClick={() => setShowPw((s) => !s)} className="text-muted-foreground shrink-0">
-                              {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            <button onClick={() => setShowPw((s) => ({ ...s, [u.id]: !s[u.id] }))} className="text-muted-foreground">
+                              {showPw[u.id] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                             </button>
                           </div>
                         </div>
+                        <p className="text-xs text-muted-foreground">Signed up {new Date(u.createdAt).toLocaleString()}</p>
                         <div className="flex gap-2">
                           {u.approved ? (
-                            <button onClick={() => revoke(u.id)} className="flex-1 rounded-lg bg-destructive/15 text-destructive text-sm font-semibold py-2">
+                            <button onClick={() => revokeUser(u.id)} className="flex-1 rounded-lg bg-destructive/15 text-destructive text-sm font-semibold py-2">
                               Revoke Access
                             </button>
                           ) : (
-                            <button onClick={() => approve(u.id)} className="flex-1 rounded-lg bg-primary text-primary-foreground text-sm font-semibold py-2">
+                            <button onClick={() => approveUser(u.id)} className="flex-1 rounded-lg bg-primary text-primary-foreground text-sm font-semibold py-2">
                               Approve
                             </button>
                           )}
-                          <button onClick={() => deleteUser(u.id)} className="rounded-lg bg-muted hover:bg-destructive/15 hover:text-destructive text-muted-foreground text-sm px-3 py-2 transition">
+                          <button onClick={() => deleteUser(u.id, u.username)} className="rounded-lg bg-muted hover:bg-destructive/15 hover:text-destructive transition px-3">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -387,9 +462,6 @@ export default function AdminDashboard() {
                   </div>
                 )}
               </Card>
-              <p className="text-xs text-muted-foreground px-1">
-                نئے users <strong>hatelecom.xyz</strong> پر signup کریں → یہاں approve کریں۔
-              </p>
             </div>
           )}
 
