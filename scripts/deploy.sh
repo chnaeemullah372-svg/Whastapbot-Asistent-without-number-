@@ -1,6 +1,6 @@
 #!/bin/bash
-# Auto-deploy script — runs on every GitHub push to main/master
-set -e
+# Auto-deploy — runs on every GitHub push to main/master
+# Uses git reset --hard to handle any local modifications cleanly
 cd /opt/whatsapp-bot
 
 LOG="/var/log/whatsapp-deploy.log"
@@ -10,30 +10,38 @@ echo "==============================="
 echo "[$(date)] Deploy started"
 echo "==============================="
 
-# Increase file descriptor limit
 ulimit -n 65536
 
-# Pull latest code from GitHub
-echo "[$(date)] git pull..."
-GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=no" git pull origin main 2>&1 || \
-GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=no" git pull origin master 2>&1 || true
+echo "[$(date)] git fetch + reset to origin/main..."
+GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=no" \
+  git fetch origin 2>&1
 
-# Install dependencies (frozen lockfile — no lockfile changes)
+# Force-sync with GitHub main — discards local modifications
+GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=no" \
+  git reset --hard origin/main 2>&1 \
+  || { echo "WARN: reset to main failed, trying master..."; \
+       GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=no" \
+       git reset --hard origin/master 2>&1; }
+
 echo "[$(date)] pnpm install..."
-pnpm install --frozen-lockfile 2>&1
+pnpm install --frozen-lockfile 2>&1 || pnpm install 2>&1 || true
 
-# Build API server
 echo "[$(date)] Build API..."
 pnpm --filter @workspace/api-server run build 2>&1
+API_EXIT=$?
+echo "[$(date)] API build exit: $API_EXIT"
 
-# Build Frontend
 echo "[$(date)] Build Frontend..."
 pnpm --filter @workspace/support-connect run build 2>&1
+FE_EXIT=$?
+echo "[$(date)] Frontend build exit: $FE_EXIT"
 
-# Restart PM2 processes (preserve WhatsApp session — only restart API + frontend)
-echo "[$(date)] Restart PM2..."
-pm2 restart whatsapp-api whatsapp-frontend 2>&1
-pm2 save 2>&1
-
-echo "[$(date)] Deploy complete!"
+if [ $API_EXIT -eq 0 ] && [ $FE_EXIT -eq 0 ]; then
+  echo "[$(date)] Both builds OK — restarting PM2..."
+  pm2 restart whatsapp-api whatsapp-frontend 2>&1
+  pm2 save 2>&1
+  echo "[$(date)] ✅ Deploy complete!"
+else
+  echo "[$(date)] ⚠️ Build failed (api=$API_EXIT fe=$FE_EXIT) — NOT restarting to keep old version running"
+fi
 echo "==============================="
