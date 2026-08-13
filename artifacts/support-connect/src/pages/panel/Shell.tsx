@@ -4,7 +4,7 @@ import { panel, panelAuth } from "@/lib/panelApi";
 import {
   Menu, X, QrCode, Settings, Wrench, ShieldCheck,
   DatabaseBackup, ScrollText, LogOut, MessageCircle, ChevronLeft, HelpCircle,
-  Users2, MessageSquare, Phone, CircleDashed,
+  Users2, MessageSquare, Phone, CircleDashed, Loader2,
 } from "lucide-react";
 
 interface MenuItem {
@@ -70,14 +70,23 @@ export default function Shell({
   const [location, navigate] = useLocation();
   const [open, setOpen] = useState(false);
   const [username, setUsername] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
     panel.get("/panel/me").then((r) => setUsername(r.username)).catch(() => {});
   }, []);
 
-  function logout() {
-    panelAuth.clear();
-    navigate("/login");
+  async function logout() {
+    setLoggingOut(true);
+    try {
+      // Wipe WhatsApp session + panel auth in one go
+      await panel.post("/panel/wa/full-logout");
+    } catch {
+      // Even if the API call fails, clear the local token
+    } finally {
+      panelAuth.clear();
+      navigate("/login");
+    }
   }
 
   return (
@@ -169,10 +178,11 @@ export default function Shell({
           })}
           <button
             onClick={logout}
-            className="w-full flex items-center gap-4 px-5 py-3.5 text-sm text-destructive hover:bg-sidebar-accent transition text-left"
+            disabled={loggingOut}
+            className="w-full flex items-center gap-4 px-5 py-3.5 text-sm text-destructive hover:bg-sidebar-accent transition text-left disabled:opacity-60"
           >
-            <LogOut className="w-5 h-5" />
-            Logout
+            {loggingOut ? <Loader2 className="w-5 h-5 animate-spin" /> : <LogOut className="w-5 h-5" />}
+            {loggingOut ? "Logging out…" : "Logout"}
           </button>
         </nav>
 
