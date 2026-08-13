@@ -1,9 +1,10 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import { panel } from "@/lib/panelApi";
 import {
   Wrench, RefreshCw, Trash2, Loader2, CheckCircle2, AlertTriangle,
-  Activity, RotateCw, KeyRound, ShieldCheck,
+  Activity, RotateCw, KeyRound, ShieldCheck, ServerCrash,
 } from "lucide-react";
 
 interface ToolDef {
@@ -16,9 +17,22 @@ interface ToolDef {
   endpoint: string;
   danger?: boolean;
   confirm?: string;
+  navigateTo?: string;       // navigate after success
+  reloadAfterMs?: number;    // auto-reload page after N ms (for server restart)
 }
 
 const TOOLS: ToolDef[] = [
+  {
+    key: "server-restart",
+    label: "Restart Server",
+    desc: "Restart all PM2 processes and reload the panel — use after a new deployment.",
+    icon: ServerCrash,
+    action: "Restart",
+    method: "post",
+    endpoint: "/panel/server/restart",
+    confirm: "This will restart the server. The page will auto-reload in ~10 seconds. Continue?",
+    reloadAfterMs: 10000,
+  },
   {
     key: "check",
     label: "Connection Checker",
@@ -39,8 +53,8 @@ const TOOLS: ToolDef[] = [
   },
   {
     key: "restart",
-    label: "Restart Service",
-    desc: "Restart the WhatsApp service without losing your session.",
+    label: "Restart WhatsApp Service",
+    desc: "Restart the WhatsApp socket without losing your session.",
     icon: RotateCw,
     action: "Restart",
     method: "post",
@@ -56,22 +70,25 @@ const TOOLS: ToolDef[] = [
     endpoint: "/panel/wa/clear",
     danger: true,
     confirm: "This clears your WhatsApp session. You'll need to reconnect. Continue?",
+    navigateTo: "/connect",
   },
   {
     key: "delete-auth",
-    label: "Delete Auth Data",
-    desc: "Wipe credentials and start fresh with a new QR code.",
+    label: "Delete Auth & Reconnect",
+    desc: "Wipe credentials completely and start fresh with a new QR / pairing code.",
     icon: KeyRound,
     action: "Delete",
     method: "post",
     endpoint: "/panel/wa/fix",
     danger: true,
-    confirm: "This deletes all authentication data and starts a fresh link. Continue?",
+    confirm: "This deletes ALL authentication data and starts a fresh link. Continue?",
+    navigateTo: "/connect",
   },
 ];
 
 export default function Tools() {
   const user = useRequirePanelAuth();
+  const [, navigate] = useLocation();
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -85,7 +102,19 @@ export default function Tools() {
       if (t.key === "check" && r?.status) {
         msg = `Connection status: ${String(r.status).replace("_", " ")}${r.hasCredentials ? " · credentials stored" : ""}.`;
       }
+      if (t.key === "server-restart") {
+        msg = r?.message ?? msg;
+      }
       setResult({ ok: true, msg });
+
+      // Auto-reload after server restart
+      if (t.reloadAfterMs) {
+        setTimeout(() => window.location.reload(), t.reloadAfterMs);
+      }
+      // Navigate after destructive ops
+      if (t.navigateTo) {
+        setTimeout(() => navigate(t.navigateTo!), 800);
+      }
     } catch (e: any) {
       setResult({ ok: false, msg: e.message });
     } finally {
