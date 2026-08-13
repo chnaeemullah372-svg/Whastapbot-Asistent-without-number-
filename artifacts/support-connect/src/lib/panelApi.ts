@@ -70,6 +70,7 @@ export const admin = {
     fetch(`${API}${url}`, { method: "POST", headers: headers(adminAuth.get()), body: body ? JSON.stringify(body) : undefined }).then(handle),
   put: (url: string, body?: object) =>
     fetch(`${API}${url}`, { method: "PUT", headers: headers(adminAuth.get()), body: body ? JSON.stringify(body) : undefined }).then(handle),
+  del: (url: string) => fetch(`${API}${url}`, { method: "DELETE", headers: headers(adminAuth.get()) }).then(handle),
   raw: (url: string) => fetch(`${API}${url}`, { headers: headers(adminAuth.get()) }),
   mediaUrl: (msgId: string) =>
     `${API}/admin-panel/media/${encodeURIComponent(msgId)}?t=${encodeURIComponent(adminAuth.get() ?? "")}`,
