@@ -43,12 +43,11 @@ interface Stats {
   whatsapp: { status: string; phoneNumber: string | null; connectedAt: string | null };
 }
 interface PanelUser {
-  exists: boolean;
-  id?: number;
-  username?: string;
-  password?: string;
-  approved?: boolean;
-  createdAt?: string;
+  id: number;
+  username: string;
+  password: string;
+  approved: boolean;
+  createdAt: string;
   approvedAt?: string | null;
 }
 
@@ -70,7 +69,7 @@ export default function AdminDashboard() {
   const [view, setView] = useState<View>("overview");
   const [drawer, setDrawer] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [user, setUser] = useState<PanelUser | null>(null);
+  const [users, setUsers] = useState<PanelUser[]>([]);
   const [messages, setMessages] = useState<(WAMessage & { _chat?: string })[]>([]);
   const [logs, setLogs] = useState<AppLog[]>([]);
   const [chats, setChats] = useState<WAChat[]>([]);
@@ -91,13 +90,13 @@ export default function AdminDashboard() {
     try {
       const [st, us, lg, ch, ac] = await Promise.all([
         admin.get("/admin-panel/stats"),
-        admin.get("/admin-panel/user"),
+        admin.get("/admin-panel/users"),
         admin.get("/admin-panel/logs?limit=120"),
         admin.get("/admin-panel/chats"),
         admin.get("/admin-panel/accounts"),
       ]);
       setStats(st);
-      setUser(us);
+      setUsers(Array.isArray(us) ? us : []);
       setLogs(lg || []);
       setChats(ch || []);
       setAccounts(ac || []);
@@ -154,8 +153,13 @@ export default function AdminDashboard() {
     navigate("/admin/login");
   }
 
-  async function approve() { await admin.post("/admin-panel/user/approve"); loadAll(); }
-  async function revoke() { await admin.post("/admin-panel/user/revoke"); loadAll(); }
+  async function approve(userId: number) { await admin.post("/admin-panel/user/approve", { userId }); loadAll(); }
+  async function revoke(userId: number) { await admin.post("/admin-panel/user/revoke", { userId }); loadAll(); }
+  async function deleteUser(userId: number) {
+    if (!window.confirm("Is user ko delete karen?")) return;
+    await admin.del(`/admin-panel/user/${userId}`).catch(() => {});
+    loadAll();
+  }
 
   async function saveBrand() {
     setBrandMsg("");
@@ -283,7 +287,7 @@ export default function AdminDashboard() {
           {view === "overview" && (
             <>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <StatCard icon={Users} label="Total Users" value={user?.exists ? "1" : "0"} tint="text-sky-400 bg-sky-400/10" />
+                <StatCard icon={Users} label="Total Users" value={String(users.length)} tint="text-sky-400 bg-sky-400/10" />
                 <StatCard icon={MessageSquare} label="Total Chats" value={String(stats?.chats ?? "—")} tint="text-primary bg-primary/10" />
                 <StatCard icon={ArrowDownLeft} label="Incoming Messages" value={String(stats?.incoming ?? "—")} tint="text-emerald-400 bg-emerald-400/10" />
                 <StatCard icon={ArrowUpRight} label="Outgoing Messages" value={String(stats?.outgoing ?? "—")} tint="text-violet-400 bg-violet-400/10" />
@@ -325,45 +329,67 @@ export default function AdminDashboard() {
           )}
 
           {view === "users" && (
-            <div className="max-w-lg">
-              <Card title="Managed User Account" icon={Users}>
-                {!user?.exists ? (
-                  <p className="text-sm text-muted-foreground">No user has signed up yet.</p>
+            <div className="max-w-2xl space-y-4">
+              <Card title={`Panel Users (${users.length})`} icon={Users}>
+                {users.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Koi user abhi signup nahi kiya.</p>
                 ) : (
-                  <div className="space-y-4">
-                    <Field label="Username" value={user.username!} />
-                    <div>
-                      <p className="text-xs text-muted-foreground">Password</p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <code className="text-sm font-mono bg-muted px-2 py-1 rounded flex-1">
-                          {showPw ? user.password : "••••••••"}
-                        </code>
-                        <button onClick={() => setShowPw((s) => !s)} className="text-muted-foreground">
-                          {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
+                  <div className="space-y-3">
+                    {users.map((u) => (
+                      <div key={u.id} className="rounded-xl border border-border p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center text-primary font-bold text-sm shrink-0">
+                              {u.username[0].toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-sm truncate">{u.username}</p>
+                              <p className="text-xs text-muted-foreground">{new Date(u.createdAt).toLocaleDateString()}</p>
+                            </div>
+                          </div>
+                          {u.approved ? (
+                            <span className="text-xs font-semibold text-primary flex items-center gap-1 shrink-0">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Approved
+                            </span>
+                          ) : (
+                            <span className="text-xs font-semibold text-yellow-500 flex items-center gap-1 shrink-0">
+                              <XCircle className="w-3.5 h-3.5" /> Pending
+                            </span>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-0.5">Password</p>
+                          <div className="flex items-center gap-2">
+                            <code className="text-sm font-mono bg-muted px-2 py-1 rounded flex-1">
+                              {showPw ? u.password : "••••••••"}
+                            </code>
+                            <button onClick={() => setShowPw((s) => !s)} className="text-muted-foreground shrink-0">
+                              {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          {u.approved ? (
+                            <button onClick={() => revoke(u.id)} className="flex-1 rounded-lg bg-destructive/15 text-destructive text-sm font-semibold py-2">
+                              Revoke Access
+                            </button>
+                          ) : (
+                            <button onClick={() => approve(u.id)} className="flex-1 rounded-lg bg-primary text-primary-foreground text-sm font-semibold py-2">
+                              Approve
+                            </button>
+                          )}
+                          <button onClick={() => deleteUser(u.id)} className="rounded-lg bg-muted hover:bg-destructive/15 hover:text-destructive text-muted-foreground text-sm px-3 py-2 transition">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">Status:</span>
-                      {user.approved ? (
-                        <span className="text-xs font-semibold text-primary flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> Approved</span>
-                      ) : (
-                        <span className="text-xs font-semibold text-yellow-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> Pending Approval</span>
-                      )}
-                    </div>
-                    {user.createdAt && <Field label="Signed up" value={new Date(user.createdAt).toLocaleString()} />}
-                    {user.approved ? (
-                      <button onClick={revoke} className="w-full rounded-lg bg-destructive/15 text-destructive text-sm font-semibold py-2.5">
-                        Revoke Access
-                      </button>
-                    ) : (
-                      <button onClick={approve} className="w-full rounded-lg bg-primary text-primary-foreground text-sm font-semibold py-2.5">
-                        Approve User
-                      </button>
-                    )}
+                    ))}
                   </div>
                 )}
               </Card>
+              <p className="text-xs text-muted-foreground px-1">
+                نئے users <strong>hatelecom.xyz</strong> پر signup کریں → یہاں approve کریں۔
+              </p>
             </div>
           )}
 
