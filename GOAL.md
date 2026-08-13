@@ -311,3 +311,70 @@ verifying it — see §5.
 - [ ] Optional follow-up (not requested yet): show a small "•" or
       WhatsApp-style label for business "verified name" vs. a plain saved
       contact name, if the owner wants that distinction visible in the UI.
+
+## 6. Round 4 — live testing on hatelecom.xyz + a deployment bug found
+
+Logged into the live site (admin panel + user panel) with the credentials
+the owner provided and probed the real, deployed API directly (not just
+the source code) to verify everything actually works end to end.
+
+### 6.1 Confirmed working live
+
+- Login (user panel + admin panel), multi-account DB schema is live
+  (`panel_user` table already has 2+ rows, composite per-user columns on
+  `wa_chats`/`wa_messages` are in place).
+- `GET /admin-panel/users` (new multi-account list), `GET
+  /admin-panel/stats`, `GET /admin-panel/pairing-code` — all return
+  correct, per-account-scoped, up-to-date data (280 chats / 12,885
+  messages on the main account, matching what's expected).
+- Signup flow (`/panel/signup`) — creates new accounts fine (used to
+  create a real second test account, `probe_signup_test`, id 3).
+
+### 6.2 Bug found: the live server is running frozen/stale code
+
+`POST /admin-panel/users`, `POST /admin-panel/users/:id/approve`, `POST
+/admin-panel/users/:id/revoke`, and `DELETE /admin-panel/users/:id` all
+return a plain Express `Cannot POST/DELETE ...` 404 on the live site —
+even though they are correctly defined in `adminPanel.ts` on this branch,
+in the same file and same commit as the `GET` routes that *do* work.
+
+Since Express registers every route independently (one route failing to
+register can't skip over later ones in the same file), the only
+explanation that fits the evidence is: **the Node process actually
+serving hatelecom.xyz is running an older build of the api-server that
+predates these four routes**, while the database schema and some other
+routes were already updated (because `scripts/post-merge.sh` pushes DB
+schema and pulls source, but never rebuilds or restarts the running app
+process).
+
+`.replit` confirms this is architecturally expected: `[postMerge]` has a
+hard `timeoutMs: 20000` (20s) — nowhere near enough time to run a full
+monorepo `pnpm run build` (esbuild bundle + Vite frontend build) safely,
+so it was correctly scoped to just `pnpm install` + `pnpm --filter db
+push`. **Shipping new backend/frontend code to production is a separate
+step this project relies on Replit's own Deployment feature for** (the
+`[deployment]` block, `deploymentTarget = "gce"`) — that's the thing that
+needs to be re-triggered (Redeploy) after a push for the running server
+to actually pick up new code. Pushing to git alone updates files + the
+database, but not the live running process.
+
+**Action needed from the owner:** open the Replit Deployments dashboard
+for this project and hit **Redeploy** (or turn on "auto-deploy on push"
+for this branch there, if available) so the live server picks up
+everything already pushed: the LID-address fix, voice message recording,
+document download/forward, and full multi-account admin CRUD. Everything
+described in Round 3 and below is done and pushed to
+`claude/website-incoming-outgoing-issue-77uox7` — it just isn't being
+served yet because the process hasn't restarted on new code since before
+several of these commits landed.
+
+### 6.3 Not yet verified (blocked on the above)
+
+- [ ] Multi-account isolation end-to-end (create 2nd account via the new
+      admin UI, confirm empty/separate chat list + own WhatsApp QR).
+- [ ] Voice message send/receive on a real chat.
+- [ ] Document (.xlsx etc.) download + in-app forward-to-any-number on a
+      real chat.
+- [ ] Reactions/star/forward/pin/mute/archive/typing/presence/@mentions
+      on a real, live conversation (all pushed and typechecked, but only
+      exercised locally, not against the live WhatsApp connection).
