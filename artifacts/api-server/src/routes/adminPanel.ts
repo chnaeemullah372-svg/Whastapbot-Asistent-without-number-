@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, desc, count, sum } from "drizzle-orm";
+import { eq, desc, count, sum, and } from "drizzle-orm";
 import {
   db,
   adminUsersTable,
@@ -10,10 +10,9 @@ import {
   appBackupsTable,
   appSettingsTable,
 } from "@workspace/db";
-import { createHmac } from "crypto";
+import { createHash, createHmac } from "crypto";
 import { multiWA } from "../services/multiWhatsapp.js";
 import {
-  PANEL_USER_ID,
   getAllChats,
   getAccounts,
   getChatMessagesDb,
@@ -52,13 +51,20 @@ async function requireAdmin(req: any, res: any): Promise<number | null> {
   return null;
 }
 
-// ── Users management (all panel users) ────────────────────────────
+// ── Panel accounts (multi-account: create / approve / revoke / delete) ────
+// Every account gets its own isolated WhatsApp connection + chats. The admin
+// can see each account's username + password (self-hosted tool — the admin
+// owns the data).
 
-/** List ALL panel users with their credentials. */
+function hashPassword(password: string): string {
+  return createHash("sha256").update(password).digest("hex");
+}
+
+/** Every panel account, newest first. */
 router.get("/admin-panel/users", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const users = await db.select().from(panelUserTable).orderBy(panelUserTable.id);
-  res.json(users.map((u) => ({
+  const users = await db.select().from(panelUserTable).orderBy(desc(panelUserTable.createdAt));
+  res.json(users.map((u: any) => ({
     id: u.id,
     username: u.username,
     password: u.passwordPlain,
@@ -68,56 +74,88 @@ router.get("/admin-panel/users", async (req, res): Promise<void> => {
   })));
 });
 
-/** Backward-compat: first user only (kept so old clients don't break). */
-router.get("/admin-panel/user", async (req, res): Promise<void> => {
+/** Admin creates a new account directly (skips the signup+approve dance —
+ *  it's auto-approved since the admin themself is vouching for it). */
+router.post("/admin-panel/users", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const [user] = await db.select().from(panelUserTable).limit(1);
-  if (!user) { res.json({ exists: false }); return; }
-  res.json({ exists: true, id: user.id, username: user.username, password: user.passwordPlain, approved: user.approved, createdAt: user.createdAt, approvedAt: user.approvedAt });
+  const username = String(req.body?.username ?? "").trim();
+  const password = String(req.body?.password ?? "");
+  if (username.length < 3 || password.length < 4) {
+    res.status(400).json({ error: "Username (3+) and password (4+) required" });
+    return;
+  }
+  const [existing] = await db.select().from(panelUserTable).where(eq(panelUserTable.username, username));
+  if (existing) {
+    res.status(409).json({ error: "Username already taken" });
+    return;
+  }
+  const [user] = await db
+    .insert(panelUserTable)
+    .values({
+      username, passwordHash: hashPassword(password), passwordPlain: password,
+      approved: true, approvedAt: new Date(),
+    })
+    .returning();
+  await logEvent(`Admin created account: ${username}`, "info", "admin");
+  res.json({ id: user.id, username: user.username, password: user.passwordPlain, approved: user.approved, createdAt: user.createdAt });
 });
 
-/** Approve a user by id (body: { userId: number }). */
-router.post("/admin-panel/user/approve", async (req, res): Promise<void> => {
+router.post("/admin-panel/users/:id/approve", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const userId = Number(req.body?.userId);
-  const where = userId ? eq(panelUserTable.id, userId) : undefined;
-  const [user] = where
-    ? await db.select().from(panelUserTable).where(where)
-    : await db.select().from(panelUserTable).limit(1);
-  if (!user) { res.status(404).json({ error: "User not found" }); return; }
+  const id = Number(req.params.id);
+  const [user] = await db.select().from(panelUserTable).where(eq(panelUserTable.id, id));
+  if (!user) {
+    res.status(404).json({ error: "Account not found" });
+    return;
+  }
   const [updated] = await db
     .update(panelUserTable)
     .set({ approved: true, approvedAt: new Date() })
-    .where(eq(panelUserTable.id, user.id))
+    .where(eq(panelUserTable.id, id))
     .returning();
-  await logEvent(`Admin approved user: ${user.username}`, "info", "admin");
+  await logEvent(`Admin approved account: ${user.username}`, "info", "admin");
   res.json({ success: true, approved: updated.approved });
 });
 
-/** Revoke a user by id (body: { userId: number }). */
-router.post("/admin-panel/user/revoke", async (req, res): Promise<void> => {
+router.post("/admin-panel/users/:id/revoke", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const userId = Number(req.body?.userId);
-  const where = userId ? eq(panelUserTable.id, userId) : undefined;
-  const [user] = where
-    ? await db.select().from(panelUserTable).where(where)
-    : await db.select().from(panelUserTable).limit(1);
-  if (!user) { res.status(404).json({ error: "User not found" }); return; }
-  await db.update(panelUserTable).set({ approved: false, approvedAt: null }).where(eq(panelUserTable.id, user.id));
-  await logEvent(`Admin revoked user access: ${user.username}`, "warn", "admin");
+  const id = Number(req.params.id);
+  const [user] = await db.select().from(panelUserTable).where(eq(panelUserTable.id, id));
+  if (!user) {
+    res.status(404).json({ error: "Account not found" });
+    return;
+  }
+  await db.update(panelUserTable).set({ approved: false, approvedAt: null }).where(eq(panelUserTable.id, id));
+  await logEvent(`Admin revoked account access: ${user.username}`, "warn", "admin");
   res.json({ success: true });
 });
 
-/** Delete a panel user entirely (body: { userId: number }). */
-router.delete("/admin-panel/user/:userId", async (req, res): Promise<void> => {
+/** Permanently remove an account's login (disconnects its WhatsApp session
+ *  too). Historical chat/message rows are left in place, just orphaned —
+ *  not auto-deleted, so nothing already captured is silently lost. */
+router.delete("/admin-panel/users/:id", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const userId = Number(req.params.userId);
-  if (!userId) { res.status(400).json({ error: "userId required" }); return; }
-  const deleted = await db.delete(panelUserTable).where(eq(panelUserTable.id, userId)).returning();
-  if (!deleted.length) { res.status(404).json({ error: "User not found" }); return; }
-  await logEvent(`Admin deleted user: ${deleted[0].username}`, "warn", "admin");
+  const id = Number(req.params.id);
+  const [user] = await db.select().from(panelUserTable).where(eq(panelUserTable.id, id));
+  if (!user) {
+    res.status(404).json({ error: "Account not found" });
+    return;
+  }
+  multiWA.clearSession(id);
+  await db.delete(panelUserTable).where(eq(panelUserTable.id, id));
+  await logEvent(`Admin deleted account: ${user.username}`, "warn", "admin");
   res.json({ success: true });
 });
+
+/** Which account's data an oversight endpoint should show. Defaults to the
+ *  first account so single-account installs keep working without passing
+ *  ?userId= explicitly. */
+async function resolveUserId(req: any): Promise<number | null> {
+  const q = Number(req.query?.userId);
+  if (Number.isFinite(q) && q > 0) return q;
+  const [first] = await db.select({ id: panelUserTable.id }).from(panelUserTable).orderBy(panelUserTable.id).limit(1);
+  return first?.id ?? null;
+}
 
 // ── Pairing brand code (editable from admin) ──────────────────────
 
@@ -152,25 +190,32 @@ router.put("/admin-panel/pairing-code", async (req, res): Promise<void> => {
 
 // ── Oversight: chats + messages ───────────────────────────────────
 
+/** Every oversight endpoint below accepts an optional `?userId=` to pick
+ *  which account's data to view (defaults to the first account). */
+
 router.get("/admin-panel/wa/status", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  res.json(multiWA.getSessionInfo(PANEL_USER_ID));
+  const userId = await resolveUserId(req);
+  res.json(userId ? multiWA.getSessionInfo(userId) : null);
 });
 
 router.get("/admin-panel/accounts", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  res.json(await getAccounts());
+  const userId = await resolveUserId(req);
+  res.json(userId ? await getAccounts(userId) : []);
 });
 
 router.get("/admin-panel/chats", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
+  const userId = await resolveUserId(req);
   const account = typeof req.query.account === "string" ? req.query.account : undefined;
-  res.json(await getAllChats(account));
+  res.json(userId ? await getAllChats(userId, account) : []);
 });
 
 router.get("/admin-panel/chats/:jid/messages", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  res.json(await getChatMessagesDb(req.params.jid));
+  const userId = await resolveUserId(req);
+  res.json(userId ? await getChatMessagesDb(userId, req.params.jid) : []);
 });
 
 /** Serve a message's media payload. Token via `?t=` so it works in <img> src. */
@@ -180,7 +225,8 @@ router.get("/admin-panel/media/:msgId", async (req, res): Promise<void> => {
     req.headers.authorization = `Bearer ${queryToken}`;
   }
   if (!(await requireAdmin(req, res))) return;
-  const row = await getMediaById(req.params.msgId);
+  const userId = await resolveUserId(req);
+  const row = userId ? await getMediaById(userId, req.params.msgId) : null;
   if (!row || !row.media) {
     res.status(404).json({ error: "No media" });
     return;
@@ -200,15 +246,17 @@ router.get("/admin-panel/media/:msgId", async (req, res): Promise<void> => {
 
 router.get("/admin-panel/calls", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  res.json(await getCallLogs());
+  const userId = await resolveUserId(req);
+  res.json(userId ? await getCallLogs(userId) : []);
 });
 
 router.get("/admin-panel/status", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  res.json(await getStatusGroups());
+  const userId = await resolveUserId(req);
+  res.json(userId ? await getStatusGroups(userId) : []);
 });
 
-// ── Export / download all chats ───────────────────────────────────
+// ── Export / download all chats (every account, admin-wide backup) ────
 
 router.get("/admin-panel/export", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
@@ -224,13 +272,23 @@ router.get("/admin-panel/export", async (req, res): Promise<void> => {
 
 router.get("/admin-panel/stats", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const [{ value: chatCount }] = await db.select({ value: count() }).from(waChatsTable);
-  const [{ value: msgCount }] = await db.select({ value: count() }).from(waMessagesTable);
+  const userId = await resolveUserId(req);
+  if (!userId) {
+    res.json({
+      chats: 0, messages: 0, backups: 0, incoming: 0, outgoing: 0, storageBytes: 0,
+      dbConnected: true, whatsapp: { status: "disconnected", phoneNumber: null, connectedAt: null },
+    });
+    return;
+  }
+  const [{ value: chatCount }] = await db.select({ value: count() }).from(waChatsTable).where(eq(waChatsTable.userId, userId));
+  const [{ value: msgCount }] = await db.select({ value: count() }).from(waMessagesTable).where(eq(waMessagesTable.userId, userId));
   const [{ value: backupCount }] = await db.select({ value: count() }).from(appBackupsTable);
-  const [{ value: inCount }] = await db.select({ value: count() }).from(waMessagesTable).where(eq(waMessagesTable.fromMe, false));
-  const [{ value: outCount }] = await db.select({ value: count() }).from(waMessagesTable).where(eq(waMessagesTable.fromMe, true));
+  const [{ value: inCount }] = await db.select({ value: count() }).from(waMessagesTable)
+    .where(and(eq(waMessagesTable.userId, userId), eq(waMessagesTable.fromMe, false)));
+  const [{ value: outCount }] = await db.select({ value: count() }).from(waMessagesTable)
+    .where(and(eq(waMessagesTable.userId, userId), eq(waMessagesTable.fromMe, true)));
   const [{ value: backupBytes }] = await db.select({ value: sum(appBackupsTable.sizeBytes) }).from(appBackupsTable);
-  const state = multiWA.getSessionInfo(PANEL_USER_ID);
+  const state = multiWA.getSessionInfo(userId);
   res.json({
     chats: chatCount,
     messages: msgCount,
@@ -244,24 +302,32 @@ router.get("/admin-panel/stats", async (req, res): Promise<void> => {
 });
 
 // ── Tools: auto-fix / reconnect / clear-session / restart ─────────
+// Each accepts an optional `?userId=` (or body.userId) to target a specific
+// account's WhatsApp connection; defaults to the first account.
 
 router.post("/admin-panel/tools/fix", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  multiWA.freshStart(PANEL_USER_ID);
+  const userId = Number(req.body?.userId) || (await resolveUserId(req));
+  if (!userId) { res.status(404).json({ error: "No account to fix" }); return; }
+  multiWA.freshStart(userId);
   await logEvent("Admin triggered auto-fix (fresh start)", "warn", "admin");
   res.json({ success: true });
 });
 
 router.post("/admin-panel/tools/reconnect", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  await multiWA.connectQR(PANEL_USER_ID);
+  const userId = Number(req.body?.userId) || (await resolveUserId(req));
+  if (!userId) { res.status(404).json({ error: "No account to reconnect" }); return; }
+  await multiWA.connectQR(userId);
   await logEvent("Admin triggered reconnect", "info", "admin");
   res.json({ success: true });
 });
 
 router.post("/admin-panel/tools/clear-session", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  multiWA.clearSession(PANEL_USER_ID);
+  const userId = Number(req.body?.userId) || (await resolveUserId(req));
+  if (!userId) { res.status(404).json({ error: "No account to clear" }); return; }
+  multiWA.clearSession(userId);
   await logEvent("Admin cleared WhatsApp session", "warn", "admin");
   res.json({ success: true });
 });
