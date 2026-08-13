@@ -77,7 +77,7 @@ router.get("/panel/exists", async (_req, res): Promise<void> => {
   res.json({ exists: !!user, approved: user?.approved ?? false });
 });
 
-/** Sign up the ONE allowed user. Rejected if an account already exists. */
+/** Sign up a new user. Requires admin approval before access is granted. */
 router.post("/panel/signup", async (req, res): Promise<void> => {
   const username = String(req.body?.username ?? "").trim();
   const password = String(req.body?.password ?? "");
@@ -85,9 +85,10 @@ router.post("/panel/signup", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Username (3+) and password (4+) required" });
     return;
   }
-  const [existing] = await db.select().from(panelUserTable).limit(1);
-  if (existing) {
-    res.status(409).json({ error: "An account already exists. Please log in." });
+  // Check for duplicate username only
+  const [existingUsername] = await db.select().from(panelUserTable).where(eq(panelUserTable.username, username));
+  if (existingUsername) {
+    res.status(409).json({ error: "This username is already taken. Please choose another." });
     return;
   }
   const [user] = await db
