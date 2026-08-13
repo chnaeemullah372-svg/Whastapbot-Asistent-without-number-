@@ -52,34 +52,39 @@ async function requireAdmin(req: any, res: any): Promise<number | null> {
   return null;
 }
 
-// ── The managed user (creds + approval) ───────────────────────────
+// ── Users management (all panel users) ────────────────────────────
 
-/** Admin can SEE the created user's username + password (self-hosted tool). */
+/** List ALL panel users with their credentials. */
+router.get("/admin-panel/users", async (req, res): Promise<void> => {
+  if (!(await requireAdmin(req, res))) return;
+  const users = await db.select().from(panelUserTable).orderBy(panelUserTable.id);
+  res.json(users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    password: u.passwordPlain,
+    approved: u.approved,
+    createdAt: u.createdAt,
+    approvedAt: u.approvedAt,
+  })));
+});
+
+/** Backward-compat: first user only (kept so old clients don't break). */
 router.get("/admin-panel/user", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
   const [user] = await db.select().from(panelUserTable).limit(1);
-  if (!user) {
-    res.json({ exists: false });
-    return;
-  }
-  res.json({
-    exists: true,
-    id: user.id,
-    username: user.username,
-    password: user.passwordPlain,
-    approved: user.approved,
-    createdAt: user.createdAt,
-    approvedAt: user.approvedAt,
-  });
+  if (!user) { res.json({ exists: false }); return; }
+  res.json({ exists: true, id: user.id, username: user.username, password: user.passwordPlain, approved: user.approved, createdAt: user.createdAt, approvedAt: user.approvedAt });
 });
 
+/** Approve a user by id (body: { userId: number }). */
 router.post("/admin-panel/user/approve", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const [user] = await db.select().from(panelUserTable).limit(1);
-  if (!user) {
-    res.status(404).json({ error: "No user to approve" });
-    return;
-  }
+  const userId = Number(req.body?.userId);
+  const where = userId ? eq(panelUserTable.id, userId) : undefined;
+  const [user] = where
+    ? await db.select().from(panelUserTable).where(where)
+    : await db.select().from(panelUserTable).limit(1);
+  if (!user) { res.status(404).json({ error: "User not found" }); return; }
   const [updated] = await db
     .update(panelUserTable)
     .set({ approved: true, approvedAt: new Date() })
@@ -89,15 +94,28 @@ router.post("/admin-panel/user/approve", async (req, res): Promise<void> => {
   res.json({ success: true, approved: updated.approved });
 });
 
+/** Revoke a user by id (body: { userId: number }). */
 router.post("/admin-panel/user/revoke", async (req, res): Promise<void> => {
   if (!(await requireAdmin(req, res))) return;
-  const [user] = await db.select().from(panelUserTable).limit(1);
-  if (!user) {
-    res.status(404).json({ error: "No user found" });
-    return;
-  }
+  const userId = Number(req.body?.userId);
+  const where = userId ? eq(panelUserTable.id, userId) : undefined;
+  const [user] = where
+    ? await db.select().from(panelUserTable).where(where)
+    : await db.select().from(panelUserTable).limit(1);
+  if (!user) { res.status(404).json({ error: "User not found" }); return; }
   await db.update(panelUserTable).set({ approved: false, approvedAt: null }).where(eq(panelUserTable.id, user.id));
   await logEvent(`Admin revoked user access: ${user.username}`, "warn", "admin");
+  res.json({ success: true });
+});
+
+/** Delete a panel user entirely (body: { userId: number }). */
+router.delete("/admin-panel/user/:userId", async (req, res): Promise<void> => {
+  if (!(await requireAdmin(req, res))) return;
+  const userId = Number(req.params.userId);
+  if (!userId) { res.status(400).json({ error: "userId required" }); return; }
+  const deleted = await db.delete(panelUserTable).where(eq(panelUserTable.id, userId)).returning();
+  if (!deleted.length) { res.status(404).json({ error: "User not found" }); return; }
+  await logEvent(`Admin deleted user: ${deleted[0].username}`, "warn", "admin");
   res.json({ success: true });
 });
 
