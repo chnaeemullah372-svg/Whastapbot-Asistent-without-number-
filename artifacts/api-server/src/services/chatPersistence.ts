@@ -126,6 +126,10 @@ async function persistMessage(
           // update in the database.
           name: name != null ? name : sql`${waChatsTable.name}`,
           avatarUrl: avatarUrl != null ? avatarUrl : sql`${waChatsTable.avatarUrl}`,
+          // Corrects itself once a @lid chat's real number resolves (see
+          // multiWhatsapp's ensureRealPhone) — always the engine's current
+          // best-known value, never blocked behind a COALESCE.
+          phone,
           // Keep the first owning account; only fill it in if it was unknown.
           accountPhone: sql`COALESCE(${waChatsTable.accountPhone}, ${accountPhone})`,
           unread:

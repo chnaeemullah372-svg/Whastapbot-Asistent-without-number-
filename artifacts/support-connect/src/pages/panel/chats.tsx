@@ -9,7 +9,7 @@ import {
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
   MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply, Star,
-  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer,
+  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic,
 } from "lucide-react";
 
 const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
@@ -41,7 +41,10 @@ function MediaContent({ msg }: { msg: WAMessage }) {
     return <audio src={url} controls className="max-w-[230px]" />;
   }
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 underline break-all">
+    // Download directly (like WhatsApp Web) instead of opening a new tab —
+    // most document types (xlsx, docx…) can't render in a browser tab anyway,
+    // which just leaves a confusing blank tab behind.
+    <a href={url} download={msg.fileName || "document"} className="flex items-center gap-1.5 underline break-all">
       📄 {msg.fileName || "Document"}
     </a>
   );
@@ -395,6 +398,11 @@ function Conversation({
   const wasComposing = useRef(false);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sendError, setSendError] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
@@ -435,6 +443,14 @@ function Conversation({
     setReplyTo(null);
     setSearchOpen(false);
     setChatSearch("");
+    // Never leave a recording running (or its mic stream open) behind when
+    // switching chats.
+    if (mediaRecorderRef.current) {
+      if (recordTimerRef.current) clearTimeout(recordTimerRef.current);
+      try { mediaRecorderRef.current.stop(); } catch {}
+      mediaRecorderRef.current = null;
+      setRecording(false);
+    }
   }, [jid]);
 
   // Keep the newest message in view like WhatsApp: always land at the bottom when
@@ -467,7 +483,11 @@ function Conversation({
       ? { quotedId: replyTo.waMessageId, quotedFromMe: replyTo.fromMe, quotedText: replyTo.text }
       : {};
     try {
-      await panel.post("/panel/send", { phone: phone.replace("+", ""), text: body, ...quote });
+      // Send by full jid, not a reconstructed phone number — some contacts
+      // (WhatsApp's newer privacy "LID" addressing) have a jid that is NOT a
+      // real phone number at all; rebuilding "<phone>@s.whatsapp.net" from
+      // it would silently address the message to the wrong place.
+      await panel.post("/panel/send", { jid, text: body, ...quote });
       setReplyTo(null);
       load();
     } catch (err: any) {
@@ -489,7 +509,7 @@ function Conversation({
     setSendError("");
     const form = new FormData();
     form.append("file", file);
-    form.append("phone", phone.replace("+", ""));
+    form.append("jid", jid);
     form.append("kind", kind);
     if (text.trim()) form.append("caption", text.trim());
     if (replyTo) {
@@ -504,6 +524,59 @@ function Conversation({
       load();
     } catch (err: any) {
       setSendError(err?.message || "Failed to send file");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      mr.onstop = () => stream.getTracks().forEach((t) => t.stop());
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    } catch {
+      setSendError("Microphone access denied or unavailable");
+    }
+  }
+
+  async function stopRecording(shouldSend: boolean) {
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    setRecording(false);
+    await new Promise<void>((resolve) => {
+      mr.addEventListener("stop", () => resolve(), { once: true });
+      mr.stop();
+    });
+    mediaRecorderRef.current = null;
+    const chunks = recordChunksRef.current;
+    recordChunksRef.current = [];
+    if (!shouldSend || chunks.length === 0) return;
+    const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+    setSending(true);
+    setSendError("");
+    const form = new FormData();
+    form.append("file", blob, "voice-note.webm");
+    form.append("jid", jid);
+    form.append("kind", "audio");
+    if (replyTo) {
+      form.append("quotedId", replyTo.waMessageId);
+      form.append("quotedFromMe", String(replyTo.fromMe));
+      form.append("quotedText", replyTo.text);
+    }
+    try {
+      await panel.postForm("/panel/send-media", form);
+      setReplyTo(null);
+      load();
+    } catch (err: any) {
+      setSendError(err?.message || "Failed to send voice message");
     } finally {
       setSending(false);
     }
@@ -763,31 +836,71 @@ function Conversation({
       )}
 
       {/* Composer */}
-      <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
-        <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={sending}
-          className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
-          aria-label="Attach media"
-        >
-          <Paperclip className="w-5 h-5" />
-        </button>
-        <input
-          value={text}
-          onChange={(e) => { setText(e.target.value); onTypingChange(e.target.value); }}
-          placeholder="Type a message"
-          className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
-        />
-        <button
-          type="submit"
-          disabled={sending || !text.trim()}
-          className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
-        >
-          {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-        </button>
-      </form>
+      {recording ? (
+        <div className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <button
+            type="button"
+            onClick={() => stopRecording(false)}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-destructive hover:bg-card transition"
+            aria-label="Cancel recording"
+          >
+            <Trash2 className="w-5 h-5" />
+          </button>
+          <div className="flex-1 flex items-center gap-2 px-4">
+            <span className="w-2.5 h-2.5 rounded-full bg-destructive animate-pulse" />
+            <span className="text-sm tabular-nums">
+              {String(Math.floor(recordSeconds / 60)).padStart(2, "0")}:{String(recordSeconds % 60).padStart(2, "0")}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => stopRecording(true)}
+            disabled={sending}
+            className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            aria-label="Send voice message"
+          >
+            {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
+            aria-label="Attach media"
+          >
+            <Paperclip className="w-5 h-5" />
+          </button>
+          <input
+            value={text}
+            onChange={(e) => { setText(e.target.value); onTypingChange(e.target.value); }}
+            placeholder="Type a message"
+            className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+          />
+          {text.trim() ? (
+            <button
+              type="submit"
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            >
+              {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={startRecording}
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+              aria-label="Record voice message"
+            >
+              <Mic className="w-5 h-5" />
+            </button>
+          )}
+        </form>
+      )}
 
       {forwardFor && (
         <ForwardSheet chats={allChats} onClose={() => setForwardFor(null)} onPick={forwardTo} />

@@ -9,7 +9,7 @@ import {
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
   Loader2, MoreVertical, Circle, Users2, Reply, X, Star, Forward, Paperclip,
-  CircleDashed, Timer, Copy, LogOut, Shield, ShieldOff, UserMinus, Pencil, Link2,
+  CircleDashed, Timer, Copy, LogOut, Shield, ShieldOff, UserMinus, Pencil, Link2, Mic,
 } from "lucide-react";
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
@@ -31,7 +31,7 @@ function MediaContent({ msg }: { msg: WAMessage }) {
   if (msg.mediaKind === "video") return <video src={url} controls className="rounded-md max-w-full max-h-72" />;
   if (msg.mediaKind === "audio") return <audio src={url} controls className="max-w-[230px]" />;
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 underline break-all">
+    <a href={url} download={msg.fileName || "document"} className="flex items-center gap-1.5 underline break-all">
       📄 {msg.fileName || "Document"}
     </a>
   );
@@ -206,6 +206,11 @@ function GroupConversation({
   const [searchOpen, setSearchOpen] = useState(false);
   const [chatSearch, setChatSearch] = useState("");
   const [infoOpen, setInfoOpen] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const didInitialScroll = useRef(false);
@@ -232,6 +237,12 @@ function GroupConversation({
     setSearchOpen(false);
     setChatSearch("");
     setInfoOpen(false);
+    if (mediaRecorderRef.current) {
+      if (recordTimerRef.current) clearTimeout(recordTimerRef.current);
+      try { mediaRecorderRef.current.stop(); } catch {}
+      mediaRecorderRef.current = null;
+      setRecording(false);
+    }
   }, [jid]);
 
   useEffect(() => {
@@ -293,6 +304,59 @@ function GroupConversation({
       load();
     } catch (err: any) {
       setSendError(err?.message || "Failed to send file");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      mr.onstop = () => stream.getTracks().forEach((t) => t.stop());
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    } catch {
+      setSendError("Microphone access denied or unavailable");
+    }
+  }
+
+  async function stopRecording(shouldSend: boolean) {
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+    setRecording(false);
+    await new Promise<void>((resolve) => {
+      mr.addEventListener("stop", () => resolve(), { once: true });
+      mr.stop();
+    });
+    mediaRecorderRef.current = null;
+    const chunks = recordChunksRef.current;
+    recordChunksRef.current = [];
+    if (!shouldSend || chunks.length === 0) return;
+    const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+    setSending(true);
+    setSendError("");
+    const form = new FormData();
+    form.append("file", blob, "voice-note.webm");
+    form.append("jid", jid);
+    form.append("kind", "audio");
+    if (replyTo) {
+      form.append("quotedId", replyTo.waMessageId);
+      form.append("quotedFromMe", String(replyTo.fromMe));
+      form.append("quotedText", replyTo.text);
+    }
+    try {
+      await panel.postForm("/panel/send-media", form);
+      setReplyTo(null);
+      load();
+    } catch (err: any) {
+      setSendError(err?.message || "Failed to send voice message");
     } finally {
       setSending(false);
     }
@@ -513,31 +577,71 @@ function GroupConversation({
         <p className="px-3 py-1 text-xs text-destructive bg-wa-panel shrink-0">{sendError}</p>
       )}
 
-      <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
-        <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={sending}
-          className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
-          aria-label="Attach media"
-        >
-          <Paperclip className="w-5 h-5" />
-        </button>
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Type a message"
-          className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
-        />
-        <button
-          type="submit"
-          disabled={sending || !text.trim()}
-          className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
-        >
-          {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-        </button>
-      </form>
+      {recording ? (
+        <div className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <button
+            type="button"
+            onClick={() => stopRecording(false)}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-destructive hover:bg-card transition"
+            aria-label="Cancel recording"
+          >
+            <Trash2 className="w-5 h-5" />
+          </button>
+          <div className="flex-1 flex items-center gap-2 px-4">
+            <span className="w-2.5 h-2.5 rounded-full bg-destructive animate-pulse" />
+            <span className="text-sm tabular-nums">
+              {String(Math.floor(recordSeconds / 60)).padStart(2, "0")}:{String(recordSeconds % 60).padStart(2, "0")}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => stopRecording(true)}
+            disabled={sending}
+            className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            aria-label="Send voice message"
+          >
+            {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={send} className="flex items-center gap-2 p-2 bg-wa-panel shrink-0 border-t border-border">
+          <input ref={fileInputRef} type="file" className="hidden" onChange={pickFile} />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending}
+            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-muted-foreground hover:bg-card transition disabled:opacity-50"
+            aria-label="Attach media"
+          >
+            <Paperclip className="w-5 h-5" />
+          </button>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Type a message"
+            className="flex-1 rounded-full bg-background border border-border px-4 py-2.5 text-sm outline-none focus:border-primary"
+          />
+          {text.trim() ? (
+            <button
+              type="submit"
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+            >
+              {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={startRecording}
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+              aria-label="Record voice message"
+            >
+              <Mic className="w-5 h-5" />
+            </button>
+          )}
+        </form>
+      )}
 
       {forwardFor && (
         <ForwardSheet chats={allChats} onClose={() => setForwardFor(null)} onPick={forwardTo} />

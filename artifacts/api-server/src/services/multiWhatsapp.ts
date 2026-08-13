@@ -199,6 +199,12 @@ class UserSession {
    *  photos rarely change and a privacy-restricted contact will always fail,
    *  so we never retry rather than hammering the same lookup on every message. */
   private avatarFetched = new Set<string>();
+  /** @lid jids we've already tried resolving to a real phone number. WhatsApp's
+   *  newer privacy addressing hands out an opaque numeric id (`<id>@lid`)
+   *  instead of the real number for some contacts — showing that raw id as
+   *  if it were a phone number is exactly the "weird huge number" confusion
+   *  this set exists to fix. */
+  private lidPhoneFetched = new Set<string>();
   /** How "authoritative" the currently-stored name for a jid is, so a lower-quality
    *  source (e.g. a chat title we just guessed) can never clobber a better one
    *  (e.g. the actual phonebook-saved contact name) once we learn it.
@@ -214,8 +220,10 @@ class UserSession {
   addReactionListener(fn: ReactionListener) { this.reactionListeners.add(fn); return () => this.reactionListeners.delete(fn); }
   addPresenceListener(fn: PresenceListener) { this.presenceListeners.add(fn); return () => this.presenceListeners.delete(fn); }
   private notifyPersist(jid: string, msg: WAChatMsg, history = false) {
-    const phone = jid.split("@")[0];
     const meta = this.chatStore.get(jid)?.meta;
+    // Prefer the chat's resolved phone (corrected for @lid jids once known)
+    // over blindly re-deriving it from the jid on every call.
+    const phone = meta?.phone ?? jid.split("@")[0];
     for (const fn of this.persistListeners) { try { fn(this.userId, jid, phone, msg, history, meta?.name, meta?.avatarUrl); } catch {} }
   }
   private notifyDelete(waMessageId: string) {
@@ -535,6 +543,29 @@ class UserSession {
         }
       })
       .catch(() => {}); // no photo / privacy-restricted — leave the initials fallback
+  }
+
+  /** Resolve a `@lid` chat's real phone number (best-effort) so the admin
+   *  sees an actual number instead of WhatsApp's opaque LID digits. Never
+   *  changes which jid we message — sending must still use the exact jid
+   *  the chat is keyed by. */
+  private ensureRealPhone(jid: string) {
+    if (!jid.endsWith("@lid") || this.lidPhoneFetched.has(jid)) return;
+    const sock = this.sock;
+    if (!sock) return;
+    this.lidPhoneFetched.add(jid);
+    sock.signalRepository.lidMapping.getPNForLID(jid)
+      .then((pn: string | null) => {
+        if (!pn) return;
+        const phone = pn.split(":")[0].split("@")[0];
+        const entry = this.chatStore.get(jid);
+        if (entry && entry.meta.phone !== phone) {
+          entry.meta.phone = phone;
+          const last = entry.msgs[entry.msgs.length - 1];
+          if (last) this.notifyPersist(jid, last, true);
+        }
+      })
+      .catch(() => { this.lidPhoneFetched.delete(jid); });
   }
 
   /** Apply a resolved display name to a chat, honouring the tier system so a
@@ -1007,6 +1038,7 @@ class UserSession {
         this.upsertMsg(jid, chatMsg, parsed.display, !isLive, parsed.nameHint);
         this.ensureGroupName(jid);
         this.ensureAvatar(jid);
+        this.ensureRealPhone(jid);
         if (chatMsg.mediaKind && !chatMsg.media) {
           // Pass the UNWRAPPED message so view-once / ephemeral media downloads
           // correctly (Baileys can't find media inside the envelope otherwise).
@@ -1063,6 +1095,7 @@ class UserSession {
         this.upsertMsg(jid, chatMsg, parsed.display, true, nameByJid.get(jid) ?? parsed.nameHint);
         if (jid.endsWith("@g.us") && !nameByJid.get(jid)) this.ensureGroupName(jid);
         this.ensureAvatar(jid);
+        this.ensureRealPhone(jid);
         if (!chatMsg.fromMe) {
           this.incomingKeys.set(chatMsg.id, { remoteJid: jid, id: chatMsg.id, fromMe: false });
         }
@@ -1114,6 +1147,21 @@ class UserSession {
     };
     sock.ev.on("contacts.upsert", (contacts: any[]) => { for (const ct of contacts) applyContact(ct); });
     sock.ev.on("contacts.update", (updates: any[]) => { for (const ct of updates) applyContact(ct); });
+
+    // WhatsApp learning (or telling us) a LID↔real-number mapping — catches a
+    // resolution as soon as it's available, without waiting for the next
+    // message in that chat to trigger ensureRealPhone's lookup.
+    sock.ev.on("lid-mapping.update", (mapping: any) => {
+      if (!mapping?.lid || !mapping?.pn) return;
+      const phone = String(mapping.pn).split(":")[0].split("@")[0];
+      this.lidPhoneFetched.add(mapping.lid);
+      const entry = this.chatStore.get(mapping.lid);
+      if (entry && entry.meta.phone !== phone) {
+        entry.meta.phone = phone;
+        const last = entry.msgs[entry.msgs.length - 1];
+        if (last) this.notifyPersist(mapping.lid, last, true);
+      }
+    });
 
     // Online / typing / recording status for a chat we've subscribed to.
     sock.ev.on("presence.update", ({ id, presences }: any) => {
