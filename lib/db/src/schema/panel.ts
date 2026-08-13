@@ -8,13 +8,16 @@ import {
   boolean,
   timestamp,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 /**
- * Single panel user. The whole app is built around ONE user account that the
- * admin oversees. The admin must be able to *see* the username + password, so
- * the plaintext password is stored alongside the hash (self-hosted personal
- * tool — the admin owns the data).
+ * A panel account. Multiple can exist (self-hosted multi-tenant): each one
+ * gets its own WhatsApp connection and its own isolated chats/messages/calls,
+ * scoped everywhere by `userId`. New signups start unapproved; an admin
+ * approves (or creates) accounts from the admin panel. The admin must be
+ * able to *see* the account's username + password, so the plaintext password
+ * is stored alongside the hash (self-hosted tool — the admin owns the data).
  */
 export const panelUserTable = pgTable("panel_user", {
   id: serial("id").primaryKey(),
@@ -27,33 +30,57 @@ export const panelUserTable = pgTable("panel_user", {
 });
 export type PanelUser = typeof panelUserTable.$inferSelect;
 
-/** One row per WhatsApp contact/chat (1:1 chats only). */
-export const waChatsTable = pgTable("wa_chats", {
-  jid: text("jid").primaryKey(),
-  phone: text("phone").notNull(),
-  name: text("name"),
-  lastMsg: text("last_msg").notNull().default(""),
-  lastMsgTs: bigint("last_msg_ts", { mode: "number" }).notNull().default(0),
-  unread: integer("unread").notNull().default(0),
-  // Which connected WhatsApp account (our own number) this chat belongs to.
-  // Lets the admin browse each connected number's chats separately over time.
-  accountPhone: text("account_phone"),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+/** One row per WhatsApp contact/chat (1:1 chats only), scoped to the owning
+ *  panel account — `jid` alone is NOT globally unique across accounts (two
+ *  different users' WhatsApp connections can both have a contact with the
+ *  same jid), so the natural key is the (userId, jid) pair. */
+export const waChatsTable = pgTable(
+  "wa_chats",
+  {
+    userId: integer("user_id").notNull().default(1),
+    jid: text("jid").notNull(),
+    phone: text("phone").notNull(),
+    name: text("name"),
+    lastMsg: text("last_msg").notNull().default(""),
+    lastMsgTs: bigint("last_msg_ts", { mode: "number" }).notNull().default(0),
+    unread: integer("unread").notNull().default(0),
+    // Which connected WhatsApp account (our own number) this chat belongs to.
+    // Lets the admin browse each connected number's chats separately over time.
+    accountPhone: text("account_phone"),
+    // Chat-list organization, same as real WhatsApp: pin to top, mute
+    // notifications, archive out of the main list.
+    pinned: boolean("pinned").notNull().default(false),
+    muted: boolean("muted").notNull().default(false),
+    archived: boolean("archived").notNull().default(false),
+    // Cached WhatsApp profile photo URL (contact or group icon).
+    avatarUrl: text("avatar_url"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.jid] }),
+  }),
+);
 export type WaChat = typeof waChatsTable.$inferSelect;
 
 /**
- * Registry of every WhatsApp number that has ever connected, with the first +
- * latest connect date. Drives the admin "Connected Numbers" view: each row's
- * chats are filtered via wa_chats.account_phone.
+ * Registry of every WhatsApp number that has ever connected for a given panel
+ * account, with the first + latest connect date. Drives the admin "Connected
+ * Numbers" view: each row's chats are filtered via wa_chats.account_phone.
  */
-export const waAccountsTable = pgTable("wa_accounts", {
-  phone: text("phone").primaryKey(),
-  name: text("name"),
-  firstConnectedAt: timestamp("first_connected_at", { withTimezone: true }).notNull().defaultNow(),
-  lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }).notNull().defaultNow(),
-  connectCount: integer("connect_count").notNull().default(1),
-});
+export const waAccountsTable = pgTable(
+  "wa_accounts",
+  {
+    userId: integer("user_id").notNull().default(1),
+    phone: text("phone").notNull(),
+    name: text("name"),
+    firstConnectedAt: timestamp("first_connected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastConnectedAt: timestamp("last_connected_at", { withTimezone: true }).notNull().defaultNow(),
+    connectCount: integer("connect_count").notNull().default(1),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.phone] }),
+  }),
+);
 export type WaAccount = typeof waAccountsTable.$inferSelect;
 
 /** Every incoming/outgoing WhatsApp message, persisted for history + backup. */
@@ -61,6 +88,7 @@ export const waMessagesTable = pgTable(
   "wa_messages",
   {
     id: serial("id").primaryKey(),
+    userId: integer("user_id").notNull().default(1),
     waMessageId: text("wa_message_id").notNull(),
     jid: text("jid").notNull(),
     text: text("text").notNull().default(""),
@@ -83,13 +111,54 @@ export const waMessagesTable = pgTable(
     // actually POSTED/sent this message, so the Status view can group updates by
     // poster. Null for ordinary 1:1 chats.
     participant: text("participant"),
+    // "Delete for me": a purely local hide (never a WhatsApp protocol call,
+    // never touches the other party's copy) — distinct from `deleted`, which
+    // is a real delete-for-everyone revoke. Hidden rows are simply excluded
+    // from the chat's message list.
+    hiddenForMe: boolean("hidden_for_me").notNull().default(false),
+    starred: boolean("starred").notNull().default(false),
+    // Was a WhatsApp "View once" / disappearing-timer message. The content is
+    // still saved (this app's anti-delete/monitoring design keeps everything
+    // by design), but the UI labels it honestly instead of hiding the fact.
+    viewOnce: boolean("view_once").notNull().default(false),
+    ephemeral: boolean("ephemeral").notNull().default(false),
+    // Set when a later `editedMessage` update replaced this row's text.
+    edited: boolean("edited").notNull().default(false),
+    // Link-preview metadata WhatsApp attaches to a text message containing a
+    // URL (title/description/site + a small thumbnail — not the full page).
+    linkPreviewUrl: text("link_preview_url"),
+    linkPreviewTitle: text("link_preview_title"),
+    linkPreviewDescription: text("link_preview_description"),
+    linkPreviewThumb: text("link_preview_thumb"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    waMsgUnique: uniqueIndex("wa_messages_wa_message_id_uq").on(t.waMessageId),
+    // A WhatsApp message id is unique WITHIN one connection, but two
+    // different accounts' independent WhatsApp connections could in theory
+    // produce the same id — scope the uniqueness to the owning account.
+    waMsgUnique: uniqueIndex("wa_messages_user_wa_message_id_uq").on(t.userId, t.waMessageId),
   }),
 );
 export type WaMessage = typeof waMessagesTable.$inferSelect;
+
+/** Emoji reactions on a message. One row per (message, reactor) — a reactor
+ *  changing/removing their reaction updates or deletes their own row, exactly
+ *  like WhatsApp (one active reaction per person per message). */
+export const waMessageReactionsTable = pgTable(
+  "wa_message_reactions",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id").notNull().default(1),
+    waMessageId: text("wa_message_id").notNull(),
+    reactorJid: text("reactor_jid").notNull(),
+    emoji: text("emoji").notNull(),
+    ts: bigint("ts", { mode: "number" }).notNull().default(0),
+  },
+  (t) => ({
+    reactionUnique: uniqueIndex("wa_message_reactions_user_msg_reactor_uq").on(t.userId, t.waMessageId, t.reactorJid),
+  }),
+);
+export type WaMessageReaction = typeof waMessageReactionsTable.$inferSelect;
 
 /**
  * WhatsApp call log. A linked/companion device only receives call
@@ -103,6 +172,7 @@ export const waCallLogsTable = pgTable(
   "wa_call_logs",
   {
     id: serial("id").primaryKey(),
+    userId: integer("user_id").notNull().default(1),
     callId: text("call_id").notNull(),
     jid: text("jid").notNull(),
     phone: text("phone").notNull(),
@@ -122,7 +192,7 @@ export const waCallLogsTable = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    callUnique: uniqueIndex("wa_call_logs_call_id_uq").on(t.callId),
+    callUnique: uniqueIndex("wa_call_logs_user_call_id_uq").on(t.userId, t.callId),
   }),
 );
 export type WaCallLog = typeof waCallLogsTable.$inferSelect;
