@@ -453,12 +453,10 @@ function GroupConversation({
                 m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
               }`}
             >
-              {m.deleted ? (
-                <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
-              ) : (
-                <>
-                  {(m.viewOnce || m.ephemeral) && (
-                    <div className="flex items-center gap-1 mb-1 text-[10px] text-muted-foreground italic">
+              <>
+                  {(m.deleted || m.viewOnce || m.ephemeral) && (
+                    <div className="flex items-center gap-1 mb-1 text-[10px] text-destructive italic">
+                      {m.deleted && <><Trash2 className="w-3 h-3" /> Deleted for everyone</>}
                       {m.viewOnce && <><CircleDashed className="w-3 h-3" /> View once</>}
                       {m.ephemeral && <><Timer className="w-3 h-3" /> Disappearing</>}
                     </div>
@@ -498,8 +496,7 @@ function GroupConversation({
                       </div>
                     </a>
                   )}
-                </>
-              )}
+              </>
               <span className="float-right ml-2 mt-1 flex items-center gap-1 text-[10px] text-muted-foreground translate-y-0.5">
                 {m.starred && <Star className="w-3 h-3 fill-current" />}
                 {m.edited && !m.deleted && <span className="italic">edited</span>}
