@@ -407,6 +407,13 @@ function Conversation({
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
   const [forwardFor, setForwardFor] = useState<WAMessage | null>(null);
+  // Swipe-to-reply: only one bubble can be mid-drag at a time, so a single
+  // (id, offset) pair is enough — no per-message state needed.
+  const [swipe, setSwipe] = useState<{ id: string; dx: number } | null>(null);
+  const swipeStartX = useRef(0);
+  const swipeDidDrag = useRef(false);
+  const SWIPE_TRIGGER_PX = 56;
+  const SWIPE_MAX_PX = 72;
   const [searchOpen, setSearchOpen] = useState(false);
   const [chatSearch, setChatSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -641,6 +648,28 @@ function Conversation({
     } catch {}
   }
 
+  // WhatsApp-style swipe-to-reply: drag a bubble right past a threshold to
+  // reply, instead of tapping it and picking "Reply" from the menu.
+  function onBubblePointerDown(e: React.PointerEvent, msg: WAMessage) {
+    if (msg.deleted) return;
+    swipeStartX.current = e.clientX;
+    swipeDidDrag.current = false;
+    setSwipe({ id: msg.waMessageId, dx: 0 });
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function onBubblePointerMove(e: React.PointerEvent, msg: WAMessage) {
+    if (!swipe || swipe.id !== msg.waMessageId) return;
+    const raw = e.clientX - swipeStartX.current;
+    if (Math.abs(raw) > 4) swipeDidDrag.current = true;
+    const dx = Math.max(0, Math.min(SWIPE_MAX_PX, raw));
+    setSwipe({ id: msg.waMessageId, dx });
+  }
+  function onBubblePointerUp(msg: WAMessage) {
+    if (!swipe || swipe.id !== msg.waMessageId) return;
+    if (swipe.dx >= SWIPE_TRIGGER_PX) setReplyTo(msg);
+    setSwipe(null);
+  }
+
   async function forwardTo(toJid: string) {
     if (!forwardFor) return;
     try {
@@ -702,14 +731,25 @@ function Conversation({
       <div ref={scrollRef} className="flex-1 overflow-y-auto wa-scroll wa-chat-bg px-3 py-4 space-y-1.5">
         {visibleMessages.map((m) => {
           const oldNoRead = m.fromMe && !m.deleted && m.status === 2 && Date.now() - m.ts > 24 * 3600 * 1000;
+          const dx = swipe?.id === m.waMessageId ? swipe.dx : 0;
           return (
           <div key={m.waMessageId} className={`flex flex-col ${m.fromMe ? "items-end" : "items-start"}`}>
-            <div
-              onClick={() => !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId)}
-              className={`relative max-w-[78%] rounded-lg px-3 py-1.5 text-sm shadow-sm ${
-                m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
-              }`}
-            >
+            <div className="relative max-w-[78%]">
+              <Reply
+                className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-[130%] w-5 h-5 text-primary"
+                style={{ opacity: Math.min(1, dx / SWIPE_TRIGGER_PX) }}
+              />
+              <div
+                onClick={() => { if (swipeDidDrag.current) { swipeDidDrag.current = false; return; } !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId); }}
+                onPointerDown={(e) => onBubblePointerDown(e, m)}
+                onPointerMove={(e) => onBubblePointerMove(e, m)}
+                onPointerUp={() => onBubblePointerUp(m)}
+                onPointerCancel={() => onBubblePointerUp(m)}
+                style={{ transform: `translateX(${dx}px)`, transition: dx === 0 && swipe?.id !== m.waMessageId ? "transform 150ms ease-out" : "none", touchAction: "pan-y" }}
+                className={`relative rounded-lg px-3 py-1.5 text-sm shadow-sm select-none ${
+                  m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
+                }`}
+              >
               {m.deleted ? (
                 <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
               ) : (
@@ -795,6 +835,7 @@ function Conversation({
                   )}
                 </div>
               )}
+              </div>
             </div>
             {m.reactions?.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-0.5">
