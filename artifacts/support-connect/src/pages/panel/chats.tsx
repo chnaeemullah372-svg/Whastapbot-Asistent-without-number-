@@ -420,6 +420,7 @@ function Conversation({
   const selectMode = selected.size > 0;
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const justEnteredSelectMode = useRef(false);
+  const suppressNextClick = useRef(false);
   const [bulkForward, setBulkForward] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [chatSearch, setChatSearch] = useState("");
@@ -694,8 +695,8 @@ function Conversation({
   }
   function onBubblePointerUp(msg: WAMessage) {
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
-    if (justEnteredSelectMode.current) { justEnteredSelectMode.current = false; return; }
-    if (selectMode) { toggleSelect(msg); return; }
+    if (justEnteredSelectMode.current) { justEnteredSelectMode.current = false; suppressNextClick.current = true; return; }
+    if (selectMode) { suppressNextClick.current = true; toggleSelect(msg); return; }
     if (swipe?.id === msg.waMessageId && swipe.dx >= SWIPE_TRIGGER_PX) setReplyTo(msg);
     setSwipe(null);
   }
@@ -830,7 +831,7 @@ function Conversation({
                 style={{ opacity: Math.min(1, dx / SWIPE_TRIGGER_PX) }}
               />
               <div
-                onClick={() => { if (swipeDidDrag.current) { swipeDidDrag.current = false; return; } if (selectMode) return; !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId); }}
+                onClick={() => { if (swipeDidDrag.current) { swipeDidDrag.current = false; return; } if (suppressNextClick.current) { suppressNextClick.current = false; return; } !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId); }}
                 onPointerDown={(e) => onBubblePointerDown(e, m)}
                 onPointerMove={(e) => onBubblePointerMove(e, m)}
                 onPointerUp={() => onBubblePointerUp(m)}
