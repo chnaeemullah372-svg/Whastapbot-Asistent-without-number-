@@ -846,12 +846,13 @@ function Conversation({
                   <Check className="w-3.5 h-3.5" />
                 </div>
               )}
-              {m.deleted ? (
-                <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
-              ) : (
-                <>
-                  {(m.viewOnce || m.ephemeral) && (
-                    <div className="flex items-center gap-1 mb-1 text-[10px] text-muted-foreground italic">
+              <>
+                  {(m.deleted || m.viewOnce || m.ephemeral) && (
+                    <div className="flex items-center gap-1 mb-1 text-[10px] text-destructive italic">
+                      {/* Content below is kept and shown as-is even when deleted — the other
+                          side asked to see the original message, not a redacted placeholder,
+                          so a deletion/view-once/disappearing message is labelled, not hidden. */}
+                      {m.deleted && <><Trash2 className="w-3 h-3" /> Deleted for everyone</>}
                       {m.viewOnce && <><CircleDashed className="w-3 h-3" /> View once</>}
                       {m.ephemeral && <><Timer className="w-3 h-3" /> Disappearing</>}
                     </div>
@@ -891,8 +892,7 @@ function Conversation({
                       </div>
                     </a>
                   )}
-                </>
-              )}
+              </>
               <span className="float-right ml-2 mt-1 flex items-center gap-1 text-[10px] text-muted-foreground translate-y-0.5">
                 {m.starred && <Star className="w-3 h-3 fill-current" />}
                 {m.edited && !m.deleted && <span className="italic">edited</span>}
