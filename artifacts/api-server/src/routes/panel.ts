@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import multer from "multer";
 import { exec } from "child_process";
 import { eq, desc } from "drizzle-orm";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../services/chatPersistence.js";
 
 const router: IRouter = Router();
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 function hashPassword(password: string): string {
   return createHash("sha256").update(password).digest("hex");
@@ -338,13 +340,43 @@ router.post("/panel/send", async (req, res): Promise<void> => {
     res.status(400).json({ error: "phone (or jid) and text required" });
     return;
   }
+  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
+  const quoted = quotedId
+    ? { waMessageId: quotedId, fromMe: req.body?.quotedFromMe === true || req.body?.quotedFromMe === "true", text: String(req.body?.quotedText ?? "") }
+    : undefined;
   try {
     const waMessageId = jid
-      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text)
-      : await multiWA.sendMessage(PANEL_USER_ID, phone, text);
+      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text, quoted)
+      : await multiWA.sendMessage(PANEL_USER_ID, phone, text, quoted);
     res.json({ success: true, waMessageId });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to send" });
+  }
+});
+
+/** Send a photo/video/voice-note/document (multipart upload) to a jid. */
+router.post("/panel/send-media", mediaUpload.single("file"), async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const jid = String(req.body?.jid ?? "").trim();
+  const kind = String(req.body?.kind ?? "") as "image" | "video" | "audio" | "document";
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!jid || !file || !["image", "video", "audio", "document"].includes(kind)) {
+    res.status(400).json({ error: "jid, kind, and file required" });
+    return;
+  }
+  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
+  const quoted = quotedId
+    ? { waMessageId: quotedId, fromMe: req.body?.quotedFromMe === true || req.body?.quotedFromMe === "true", text: String(req.body?.quotedText ?? "") }
+    : undefined;
+  try {
+    const waMessageId = await multiWA.sendMedia(PANEL_USER_ID, jid, file.buffer, file.mimetype, kind, {
+      caption: req.body?.caption ? String(req.body.caption) : undefined,
+      fileName: file.originalname,
+      quoted,
+    });
+    res.json({ success: true, waMessageId });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to send file" });
   }
 });
 
