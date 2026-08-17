@@ -3,7 +3,7 @@ import { useLocation } from "wouter";
 import QRCode from "qrcode";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import { panel, type WAStatus, type WAState } from "@/lib/panelApi";
-import { QrCode, Smartphone, Loader2, CheckCircle2, RefreshCw, Power, AlertTriangle, Copy, Check, Wifi, MessageCircle } from "lucide-react";
+import { QrCode, Smartphone, Loader2, CheckCircle2, RefreshCw, Power, AlertTriangle, Copy, Check, Wifi, MessageCircle, KeyRound } from "lucide-react";
 
 /** Official WhatsApp glyph (lucide dropped brand icons). */
 function WhatsAppLogo({ className = "" }: { className?: string }) {
@@ -132,6 +132,25 @@ export default function Connect() {
     }
   }
 
+  const [fixBusy, setFixBusy] = useState(false);
+  async function deleteAuthAndReconnect() {
+    if (!window.confirm("This deletes ALL authentication data and starts a fresh link. Continue?")) return;
+    setFixBusy(true);
+    setError("");
+    try {
+      await panel.post("/panel/wa/fix");
+      setState(null);
+      setQrDataUrl("");
+      setSeconds(0);
+      setMode("qr");
+      refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setFixBusy(false);
+    }
+  }
+
   function copyCode() {
     if (!state?.pairingCode) return;
     navigator.clipboard?.writeText(state.pairingCode.replace(/[^A-Z0-9]/gi, ""));
@@ -180,6 +199,17 @@ export default function Connect() {
             <AlertTriangle className="w-4 h-4 shrink-0" /> {error}
           </div>
         )}
+
+        {/* Auto-fix: always visible here, not buried in Settings — this is the
+            first place someone facing a stuck connection will look. */}
+        <button
+          onClick={deleteAuthAndReconnect}
+          disabled={fixBusy}
+          className="w-full rounded-2xl bg-destructive/10 text-destructive font-semibold py-3.5 flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.99] transition border border-destructive/20"
+        >
+          {fixBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+          {fixBusy ? "Wiping session…" : "Auto-Fix: Delete Auth & Reconnect"}
+        </button>
 
         {connected ? (
           <div className="space-y-3">
