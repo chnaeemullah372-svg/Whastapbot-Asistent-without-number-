@@ -9,7 +9,7 @@ import {
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
   MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply, Star,
-  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic,
+  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic, Copy,
 } from "lucide-react";
 
 const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
@@ -414,6 +414,13 @@ function Conversation({
   const swipeDidDrag = useRef(false);
   const SWIPE_TRIGGER_PX = 56;
   const SWIPE_MAX_PX = 72;
+  // Multi-select mode (WhatsApp-style): long-press a bubble to enter it,
+  // tap more bubbles to add to the selection, act on all of them at once.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const selectMode = selected.size > 0;
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const justEnteredSelectMode = useRef(false);
+  const [bulkForward, setBulkForward] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [chatSearch, setChatSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -648,34 +655,94 @@ function Conversation({
     } catch {}
   }
 
-  // WhatsApp-style swipe-to-reply: drag a bubble right past a threshold to
-  // reply, instead of tapping it and picking "Reply" from the menu.
+  function toggleSelect(msg: WAMessage) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(msg.waMessageId)) next.delete(msg.waMessageId);
+      else next.add(msg.waMessageId);
+      return next;
+    });
+  }
+  function cancelSelect() { setSelected(new Set()); }
+
+  // WhatsApp-style swipe-to-reply (drag right past a threshold) + long-press
+  // to enter multi-select — both live on the same bubble pointer handlers so
+  // they can tell a drag, a tap, and a hold apart.
   function onBubblePointerDown(e: React.PointerEvent, msg: WAMessage) {
     if (msg.deleted) return;
     swipeStartX.current = e.clientX;
     swipeDidDrag.current = false;
-    setSwipe({ id: msg.waMessageId, dx: 0 });
+    if (!selectMode) setSwipe({ id: msg.waMessageId, dx: 0 });
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    if (!selectMode) {
+      longPressTimer.current = setTimeout(() => {
+        justEnteredSelectMode.current = true;
+        setSwipe(null);
+        toggleSelect(msg);
+      }, 450);
+    }
   }
   function onBubblePointerMove(e: React.PointerEvent, msg: WAMessage) {
-    if (!swipe || swipe.id !== msg.waMessageId) return;
     const raw = e.clientX - swipeStartX.current;
-    if (Math.abs(raw) > 4) swipeDidDrag.current = true;
+    if (Math.abs(raw) > 4) {
+      swipeDidDrag.current = true;
+      if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+    }
+    if (selectMode || !swipe || swipe.id !== msg.waMessageId) return;
     const dx = Math.max(0, Math.min(SWIPE_MAX_PX, raw));
     setSwipe({ id: msg.waMessageId, dx });
   }
   function onBubblePointerUp(msg: WAMessage) {
-    if (!swipe || swipe.id !== msg.waMessageId) return;
-    if (swipe.dx >= SWIPE_TRIGGER_PX) setReplyTo(msg);
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+    if (justEnteredSelectMode.current) { justEnteredSelectMode.current = false; return; }
+    if (selectMode) { toggleSelect(msg); return; }
+    if (swipe?.id === msg.waMessageId && swipe.dx >= SWIPE_TRIGGER_PX) setReplyTo(msg);
     setSwipe(null);
   }
 
   async function forwardTo(toJid: string) {
-    if (!forwardFor) return;
-    try {
-      await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(forwardFor.waMessageId)}/forward`, { toJid });
-    } catch {}
+    const targets = bulkForward ? messages.filter((m) => selected.has(m.waMessageId)) : forwardFor ? [forwardFor] : [];
+    for (const m of targets) {
+      try {
+        await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(m.waMessageId)}/forward`, { toJid });
+      } catch {}
+    }
     setForwardFor(null);
+    setBulkForward(false);
+    cancelSelect();
+  }
+
+  const selectedMsgs = messages.filter((m) => selected.has(m.waMessageId));
+
+  async function bulkDeleteForMe() {
+    if (!window.confirm(`Delete ${selectedMsgs.length} message(s) for you?`)) return;
+    for (const m of selectedMsgs) {
+      try { await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(m.waMessageId)}/hide`); } catch {}
+    }
+    cancelSelect();
+    load();
+  }
+
+  async function bulkStar() {
+    const makeStarred = selectedMsgs.some((m) => !m.starred);
+    for (const m of selectedMsgs) {
+      try {
+        await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(m.waMessageId)}/star`, { starred: makeStarred });
+      } catch {}
+    }
+    cancelSelect();
+    load();
+  }
+
+  function bulkCopy() {
+    const text = selectedMsgs
+      .slice()
+      .sort((a, b) => a.ts - b.ts)
+      .map((m) => m.text)
+      .filter(Boolean)
+      .join("\n");
+    if (text) navigator.clipboard?.writeText(text);
+    cancelSelect();
   }
 
   const visibleMessages = chatSearch.trim()
@@ -691,24 +758,46 @@ function Conversation({
 
   return (
     <div className="h-[100dvh] bg-background flex flex-col max-w-md mx-auto">
-      {/* Conversation header — sidebar hidden, back button shown */}
-      <header className="flex items-center gap-2 px-3 h-14 bg-wa-header text-white shrink-0 shadow-md z-10">
-        <button onClick={onBack} className="p-1">
-          <ChevronLeft className="w-6 h-6" />
-        </button>
-        <Avatar url={chat?.avatarUrl} label={title} size={36} />
-        <div className="flex-1 min-w-0">
-          <p className="font-semibold leading-tight truncate">{title}</p>
-          {presenceLabel && (
-            <p className={`text-[11px] leading-tight truncate ${presenceLabel === "typing…" ? "text-emerald-300" : "text-white/60"}`}>
-              {presenceLabel}
-            </p>
-          )}
-        </div>
-        <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
-          <Search className="w-5 h-5" />
-        </button>
-      </header>
+      {/* Conversation header — sidebar hidden, back button shown. Swaps to a
+          multi-select action bar (WhatsApp-style) once anything is selected. */}
+      {selectMode ? (
+        <header className="flex items-center gap-1 px-2 h-14 bg-wa-header text-white shrink-0 shadow-md z-10">
+          <button onClick={cancelSelect} className="p-2" aria-label="Cancel selection">
+            <X className="w-5 h-5" />
+          </button>
+          <p className="flex-1 font-semibold">{selected.size} selected</p>
+          <button onClick={bulkStar} className="p-2" aria-label="Star">
+            <Star className="w-5 h-5" />
+          </button>
+          <button onClick={bulkCopy} className="p-2" aria-label="Copy text">
+            <Copy className="w-5 h-5" />
+          </button>
+          <button onClick={() => setBulkForward(true)} className="p-2" aria-label="Forward">
+            <Forward className="w-5 h-5" />
+          </button>
+          <button onClick={bulkDeleteForMe} className="p-2" aria-label="Delete">
+            <Trash2 className="w-5 h-5" />
+          </button>
+        </header>
+      ) : (
+        <header className="flex items-center gap-2 px-3 h-14 bg-wa-header text-white shrink-0 shadow-md z-10">
+          <button onClick={onBack} className="p-1">
+            <ChevronLeft className="w-6 h-6" />
+          </button>
+          <Avatar url={chat?.avatarUrl} label={title} size={36} />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold leading-tight truncate">{title}</p>
+            {presenceLabel && (
+              <p className={`text-[11px] leading-tight truncate ${presenceLabel === "typing…" ? "text-emerald-300" : "text-white/60"}`}>
+                {presenceLabel}
+              </p>
+            )}
+          </div>
+          <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
+            <Search className="w-5 h-5" />
+          </button>
+        </header>
+      )}
 
       {/* In-chat search */}
       {searchOpen && (
@@ -732,15 +821,16 @@ function Conversation({
         {visibleMessages.map((m) => {
           const oldNoRead = m.fromMe && !m.deleted && m.status === 2 && Date.now() - m.ts > 24 * 3600 * 1000;
           const dx = swipe?.id === m.waMessageId ? swipe.dx : 0;
+          const isSelected = selected.has(m.waMessageId);
           return (
-          <div key={m.waMessageId} className={`flex flex-col ${m.fromMe ? "items-end" : "items-start"}`}>
+          <div key={m.waMessageId} className={`flex flex-col ${m.fromMe ? "items-end" : "items-start"} ${isSelected ? "bg-primary/10 -mx-3 px-3" : ""}`}>
             <div className="relative max-w-[78%]">
               <Reply
                 className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-[130%] w-5 h-5 text-primary"
                 style={{ opacity: Math.min(1, dx / SWIPE_TRIGGER_PX) }}
               />
               <div
-                onClick={() => { if (swipeDidDrag.current) { swipeDidDrag.current = false; return; } !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId); }}
+                onClick={() => { if (swipeDidDrag.current) { swipeDidDrag.current = false; return; } if (selectMode) return; !m.deleted && setMenuFor(menuFor === m.waMessageId ? null : m.waMessageId); }}
                 onPointerDown={(e) => onBubblePointerDown(e, m)}
                 onPointerMove={(e) => onBubblePointerMove(e, m)}
                 onPointerUp={() => onBubblePointerUp(m)}
@@ -750,6 +840,11 @@ function Conversation({
                   m.fromMe ? "bg-wa-bubble-out text-foreground rounded-tr-none" : "bg-wa-bubble-in text-foreground rounded-tl-none"
                 }`}
               >
+              {isSelected && (
+                <div className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center shadow">
+                  <Check className="w-3.5 h-3.5" />
+                </div>
+              )}
               {m.deleted ? (
                 <span className="italic text-muted-foreground text-xs">🚫 This message was deleted</span>
               ) : (
@@ -943,8 +1038,8 @@ function Conversation({
         </form>
       )}
 
-      {forwardFor && (
-        <ForwardSheet chats={allChats} onClose={() => setForwardFor(null)} onPick={forwardTo} />
+      {(forwardFor || bulkForward) && (
+        <ForwardSheet chats={allChats} onClose={() => { setForwardFor(null); setBulkForward(false); }} onPick={forwardTo} />
       )}
     </div>
   );
