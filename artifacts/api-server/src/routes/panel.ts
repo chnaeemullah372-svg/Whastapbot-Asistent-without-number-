@@ -220,7 +220,7 @@ router.get("/panel/chats", async (req, res): Promise<void> => {
   // number connects: each number's chat history is isolated by accountPhone.
   const info = multiWA.getSessionInfo(PANEL_USER_ID);
   const accountPhone = info?.phoneNumber ?? null;
-  res.json(await getAllChats(accountPhone ?? undefined));
+  res.json(await getAllChats(PANEL_USER_ID, accountPhone ?? undefined));
 });
 
 /**
@@ -284,18 +284,18 @@ router.get("/panel/events", async (req, res): Promise<void> => {
  *  unavailable from a linked device, so the client shows that honestly. */
 router.get("/panel/calls", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
-  res.json(await getCallLogs());
+  res.json(await getCallLogs(PANEL_USER_ID));
 });
 
 /** Status (stories) grouped by the contact who posted them. */
 router.get("/panel/status", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
-  res.json(await getStatusGroups());
+  res.json(await getStatusGroups(PANEL_USER_ID));
 });
 
 router.get("/panel/chats/:jid/messages", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
-  const rows = await getChatMessagesDb(req.params.jid);
+  const rows = await getChatMessagesDb(PANEL_USER_ID, req.params.jid);
   res.json(rows);
 });
 
@@ -307,7 +307,7 @@ router.get("/panel/media/:msgId", async (req, res): Promise<void> => {
     req.headers.authorization = `Bearer ${queryToken}`;
   }
   if (!(await requirePanelUser(req, res))) return;
-  const row = await getMediaById(req.params.msgId);
+  const row = await getMediaById(PANEL_USER_ID, req.params.msgId);
   if (!row || !row.media) {
     res.status(404).json({ error: "No media" });
     return;
@@ -324,7 +324,7 @@ router.get("/panel/media/:msgId", async (req, res): Promise<void> => {
 router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
   multiWA.markRead(PANEL_USER_ID, req.params.jid);
-  await clearUnread(req.params.jid);
+  await clearUnread(PANEL_USER_ID, req.params.jid);
   res.json({ success: true });
 });
 
@@ -354,7 +354,7 @@ router.delete("/panel/chats/:jid/:msgId", async (req, res): Promise<void> => {
   const fromMe = req.query.fromMe === "true";
   try {
     await multiWA.deleteForEveryone(PANEL_USER_ID, req.params.jid, req.params.msgId, fromMe);
-    await markDeleted(req.params.msgId);
+    await markDeleted(PANEL_USER_ID, req.params.msgId);
     res.json({ success: true });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to delete" });

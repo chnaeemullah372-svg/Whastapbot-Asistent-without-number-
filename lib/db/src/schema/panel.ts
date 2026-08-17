@@ -42,6 +42,9 @@ export const waChatsTable = pgTable(
     unread: integer("unread").notNull().default(0),
     // Which connected WhatsApp account (our own number) this chat belongs to.
     accountPhone: text("account_phone"),
+    pinned: boolean("pinned").notNull().default(false),
+    muted: boolean("muted").notNull().default(false),
+    archived: boolean("archived").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -88,6 +91,7 @@ export const waMessagesTable = pgTable(
     starred: boolean("starred").notNull().default(false),
     hiddenForMe: boolean("hidden_for_me").notNull().default(false),
     viewOnce: boolean("view_once").notNull().default(false),
+    ephemeral: boolean("ephemeral").notNull().default(false),
     quotedText: text("quoted_text"),
     quotedId: text("quoted_id"),
     media: text("media"),
@@ -114,6 +118,7 @@ export const waCallLogsTable = pgTable(
   "wa_call_logs",
   {
     id: serial("id").primaryKey(),
+    userId: integer("user_id").notNull().default(1),
     callId: text("call_id").notNull(),
     jid: text("jid").notNull(),
     phone: text("phone").notNull(),
@@ -130,7 +135,7 @@ export const waCallLogsTable = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    callUnique: uniqueIndex("wa_call_logs_call_id_uq").on(t.callId),
+    callUnique: uniqueIndex("wa_call_logs_user_call_id_uq").on(t.userId, t.callId),
   }),
 );
 export type WaCallLog = typeof waCallLogsTable.$inferSelect;
