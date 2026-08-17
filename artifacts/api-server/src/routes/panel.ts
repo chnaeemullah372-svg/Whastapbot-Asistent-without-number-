@@ -330,6 +330,15 @@ router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
   res.json({ success: true });
 });
 
+/** Tell WhatsApp we're composing (or done composing) in this chat, so the
+ *  other side sees the "typing…" indicator. */
+router.post("/panel/chats/:jid/typing", async (req, res): Promise<void> => {
+  if (!(await requirePanelUser(req, res))) return;
+  const composing = req.body?.composing === true || req.body?.composing === "true";
+  await multiWA.setTyping(PANEL_USER_ID, req.params.jid, composing);
+  res.json({ success: true });
+});
+
 /** Send a message to a phone number OR a group JID (creates the chat if new). */
 router.post("/panel/send", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
