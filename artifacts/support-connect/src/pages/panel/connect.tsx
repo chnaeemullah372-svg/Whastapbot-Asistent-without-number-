@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useLocation } from "wouter";
 import QRCode from "qrcode";
 import Shell, { useRequirePanelAuth } from "./Shell";
-import { panel, type WAStatus, type WAState } from "@/lib/panelApi";
-import { QrCode, Smartphone, Loader2, CheckCircle2, RefreshCw, Power, AlertTriangle, Copy, Check, Wifi, MessageCircle, KeyRound } from "lucide-react";
+import { panel, panelAuth, type WAStatus, type WAState } from "@/lib/panelApi";
+import { QrCode, Smartphone, Loader2, CheckCircle2, RefreshCw, Power, AlertTriangle, Copy, Check, Wifi, MessageCircle, KeyRound, LogOut } from "lucide-react";
 
 /** Official WhatsApp glyph (lucide dropped brand icons). */
 function WhatsAppLogo({ className = "" }: { className?: string }) {
@@ -151,6 +151,46 @@ export default function Connect() {
     }
   }
 
+  // "Refresh" — re-pull both the WhatsApp connection state and the panel
+  // login itself, so a session that went stale (e.g. password changed, token
+  // expired) is caught here rather than silently failing every request.
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  async function refreshAll() {
+    setRefreshBusy(true);
+    setError("");
+    try {
+      await panel.get("/panel/me");
+      refresh();
+    } catch (e: any) {
+      if (e?.status === 401 || e?.status === 403) {
+        panelAuth.clear();
+        navigate("/login");
+        return;
+      }
+      setError(e.message);
+    } finally {
+      setRefreshBusy(false);
+    }
+  }
+
+  // "Complete Logout" — the ONLY place that unlinks WhatsApp itself (unlike
+  // the sidebar's website-only Logout). Force-clears the panel session
+  // locally even if the WhatsApp unlink call fails, so the admin is never
+  // stuck unable to log back in and retry.
+  const [fullLogoutBusy, setFullLogoutBusy] = useState(false);
+  async function completeLogout() {
+    if (!window.confirm("This logs out WhatsApp AND your website login completely. Continue?")) return;
+    setFullLogoutBusy(true);
+    try {
+      await panel.post("/panel/wa/full-logout");
+    } catch {
+      // Force the website logout through regardless — see comment above.
+    } finally {
+      panelAuth.clear();
+      navigate("/login");
+    }
+  }
+
   function copyCode() {
     if (!state?.pairingCode) return;
     navigator.clipboard?.writeText(state.pairingCode.replace(/[^A-Z0-9]/gi, ""));
@@ -200,16 +240,36 @@ export default function Connect() {
           </div>
         )}
 
-        {/* Auto-fix: always visible here, not buried in Settings — this is the
-            first place someone facing a stuck connection will look. */}
-        <button
-          onClick={deleteAuthAndReconnect}
-          disabled={fixBusy}
-          className="w-full rounded-2xl bg-destructive/10 text-destructive font-semibold py-3.5 flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.99] transition border border-destructive/20"
-        >
-          {fixBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
-          {fixBusy ? "Wiping session…" : "Auto-Fix: Delete Auth & Reconnect"}
-        </button>
+        {/* Always visible here, not buried behind the hamburger/sidebar — this
+            is the first place someone facing a stuck connection will look,
+            and reaching the sidebar from this screen means leaving it first
+            (this page shows a back-arrow, not a menu button, in its header). */}
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            onClick={deleteAuthAndReconnect}
+            disabled={fixBusy}
+            className="rounded-2xl bg-destructive/10 text-destructive font-semibold py-3 flex flex-col items-center justify-center gap-1 disabled:opacity-60 active:scale-[0.99] transition border border-destructive/20 text-xs"
+          >
+            {fixBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+            Auto Fix
+          </button>
+          <button
+            onClick={completeLogout}
+            disabled={fullLogoutBusy}
+            className="rounded-2xl bg-destructive/10 text-destructive font-semibold py-3 flex flex-col items-center justify-center gap-1 disabled:opacity-60 active:scale-[0.99] transition border border-destructive/20 text-xs"
+          >
+            {fullLogoutBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogOut className="w-4 h-4" />}
+            Complete Logout
+          </button>
+          <button
+            onClick={refreshAll}
+            disabled={refreshBusy}
+            className="rounded-2xl bg-muted text-foreground font-semibold py-3 flex flex-col items-center justify-center gap-1 disabled:opacity-60 active:scale-[0.99] transition border border-border text-xs"
+          >
+            {refreshBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Refresh
+          </button>
+        </div>
 
         {connected ? (
           <div className="space-y-3">

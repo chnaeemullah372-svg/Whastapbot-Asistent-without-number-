@@ -76,17 +76,16 @@ export default function Shell({
     panel.get("/panel/me").then((r) => setUsername(r.username)).catch(() => {});
   }, []);
 
-  async function logout() {
+  // Logs out of the WEBSITE only (this admin login) — never touches the
+  // linked WhatsApp connection. Logging back in (same or a different panel
+  // user) must find WhatsApp still connected, exactly like closing and
+  // reopening WhatsApp Web in a browser doesn't unlink the phone. Unlinking
+  // WhatsApp itself is a separate, explicit action ("Complete Logout") on
+  // the Connect screen, never a side effect of this button.
+  function logout() {
     setLoggingOut(true);
-    try {
-      // Wipe WhatsApp session + panel auth in one go
-      await panel.post("/panel/wa/full-logout");
-    } catch {
-      // Even if the API call fails, clear the local token
-    } finally {
-      panelAuth.clear();
-      navigate("/login");
-    }
+    panelAuth.clear();
+    navigate("/login");
   }
 
   return (
