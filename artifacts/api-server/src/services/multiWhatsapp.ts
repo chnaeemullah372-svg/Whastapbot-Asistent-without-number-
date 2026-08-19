@@ -727,7 +727,11 @@ class UserSession {
     if (!msg?.message) return null;
     const jid = msg.key?.remoteJid ?? "";
     // Show EVERYTHING: individual chats, groups and status/stories.
-    const isUser = jid.endsWith("@s.whatsapp.net");
+    // "@lid" is WhatsApp's newer privacy-addressing JID format — treat it the
+    // same as a regular user JID (@s.whatsapp.net) so incoming messages from
+    // these contacts are not silently dropped (this was fixed once already
+    // in 3aa8396, then lost during a later branch merge).
+    const isUser = jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid");
     const isGroup = jid.endsWith("@g.us");
     const isStatus = jid === "status@broadcast";
     if (!isUser && !isGroup && !isStatus) return null;
