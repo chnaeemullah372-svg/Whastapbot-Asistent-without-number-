@@ -138,8 +138,22 @@ async function persistMessage(
           // multiWhatsapp's ensureRealPhone) — always the engine's current
           // best-known value, never blocked behind a COALESCE.
           phone,
-          // Keep the first owning account; only fill it in if it was unknown.
-          accountPhone: sql`COALESCE(${waChatsTable.accountPhone}, ${accountPhone})`,
+          // Keep the first owning account for OLD/history-sync traffic (so
+          // connecting a new number doesn't retroactively relabel chats that
+          // only ever existed from a previous number's history). But a
+          // genuinely LIVE message (history=false) can only have just arrived
+          // on the socket that is connected RIGHT NOW — so it must always
+          // reassign accountPhone to the current number, even if this jid's
+          // row already had a stale one from an earlier connected number.
+          // Without this, a real-world contact whose WhatsApp-assigned @lid
+          // stays the same across our different linked numbers gets its chat
+          // permanently frozen under the first number that ever saw it, and
+          // every later live reply — though correctly received — silently
+          // disappears from /panel/chats (which filters by the currently
+          // connected number).
+          accountPhone: history
+            ? sql`COALESCE(${waChatsTable.accountPhone}, ${accountPhone})`
+            : accountPhone,
           unread:
             history || msg.fromMe
               ? sql`${waChatsTable.unread}`
