@@ -53,6 +53,11 @@ export const waChatsTable = pgTable(
     pinned: boolean("pinned").notNull().default(false),
     muted: boolean("muted").notNull().default(false),
     archived: boolean("archived").notNull().default(false),
+    // "Delete chat" (WhatsApp Web): a local-only hide, same anti-delete
+    // philosophy as message-level hideForMe — messages stay in the DB for
+    // monitoring, the chat just drops out of the list. Cleared automatically
+    // the next time this chat sees a live message (see persistMessage).
+    deletedForMe: boolean("deleted_for_me").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -83,6 +88,27 @@ export const waAccountsTable = pgTable(
 );
 export type WaAccount = typeof waAccountsTable.$inferSelect;
 
+/**
+ * One row per connect→disconnect cycle of a WhatsApp number. This is the
+ * admin-only "backup" boundary the owner asked for: everything that happens
+ * while `disconnectedAt` is still null belongs to this session; once a number
+ * disconnects the session is closed and a later reconnect always opens a
+ * fresh one. Messages/calls captured during a session are tagged with its id
+ * (see `wa_messages.session_id` / `wa_call_logs.session_id`) so the admin
+ * panel can replay exactly what existed during that specific connected
+ * window, even if the panel user later hides/deletes something on their own
+ * side (which only ever flags rows — see the anti-delete design on
+ * `wa_messages` — never actually erases them).
+ */
+export const waSessionsTable = pgTable("wa_sessions", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  phone: text("phone").notNull(),
+  connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+  disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
+});
+export type WaSession = typeof waSessionsTable.$inferSelect;
+
 /** Every incoming/outgoing WhatsApp message, persisted for history + backup. */
 export const waMessagesTable = pgTable(
   "wa_messages",
@@ -99,6 +125,9 @@ export const waMessagesTable = pgTable(
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     quotedText: text("quoted_text"),
     quotedId: text("quoted_id"),
+    // Which connect→disconnect session (wa_sessions.id) this message arrived
+    // during — null for messages persisted before this feature existed.
+    sessionId: integer("session_id"),
     media: text("media"),
     mediaMime: text("media_mime"),
     mediaKind: text("media_kind"),
@@ -144,6 +173,7 @@ export const waCallLogsTable = pgTable(
     phone: text("phone").notNull(),
     name: text("name"),
     accountPhone: text("account_phone"),
+    sessionId: integer("session_id"),
     outgoing: boolean("outgoing").notNull().default(false),
     isVideo: boolean("is_video").notNull().default(false),
     isGroup: boolean("is_group").notNull().default(false),

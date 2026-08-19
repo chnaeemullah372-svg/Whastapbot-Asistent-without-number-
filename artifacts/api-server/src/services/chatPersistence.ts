@@ -7,6 +7,7 @@ import {
   waMessageReactionsTable,
   waCallLogsTable,
   waAccountsTable,
+  waSessionsTable,
   appLogsTable,
   adminUsersTable,
   panelUserTable,
@@ -33,6 +34,11 @@ let started = false;
 const pendingDeletes = new Set<string>();
 const pendingKey = (userId: number, waMessageId: string) => `${userId}:${waMessageId}`;
 
+/** The currently-open backup session (wa_sessions.id) per panel account, if
+ *  its WhatsApp number is connected right now. Absent/undefined = no open
+ *  session, so freshly-arriving messages just aren't tagged with one. */
+const openSessionByUser = new Map<number, number>();
+
 /** Append a line to the application log table (best-effort, never throws). */
 export async function logEvent(message: string, level = "info", source = "system") {
   try {
@@ -53,6 +59,7 @@ async function persistMessage(
     // The WhatsApp number that is currently linked — every chat we capture is
     // tagged with it so the admin can browse each connected number separately.
     const accountPhone = multiWA.getSessionInfo(userId)?.phoneNumber ?? null;
+    const sessionId = openSessionByUser.get(userId) ?? null;
     // If a revoke for this id arrived before the original, honour it now.
     const isDeleted = (msg.deleted ?? false) || pendingDeletes.has(pendingKey(userId, msg.id));
     await db
@@ -69,6 +76,7 @@ async function persistMessage(
         deletedAt: isDeleted ? new Date() : null,
         quotedText: msg.quotedText,
         quotedId: msg.quotedId,
+        sessionId,
         media: msg.media,
         mediaMime: msg.mediaMime,
         mediaKind: msg.mediaKind,
@@ -95,6 +103,9 @@ async function persistMessage(
           deletedAt: sql`COALESCE(${waMessagesTable.deletedAt}, ${isDeleted ? new Date() : null})`,
           quotedText: msg.quotedText,
           quotedId: msg.quotedId,
+          // Keep whichever session first captured this message — a later
+          // resync/reprocess must never re-tag it into today's session.
+          sessionId: sql`COALESCE(${waMessagesTable.sessionId}, ${sessionId})`,
           media: sql`COALESCE(${waMessagesTable.media}, ${msg.media ?? null})`,
           mediaMime: sql`COALESCE(${waMessagesTable.mediaMime}, ${msg.mediaMime ?? null})`,
           mediaKind: sql`COALESCE(${waMessagesTable.mediaKind}, ${msg.mediaKind ?? null})`,
@@ -158,6 +169,10 @@ async function persistMessage(
             history || msg.fromMe
               ? sql`${waChatsTable.unread}`
               : sql`${waChatsTable.unread} + 1`,
+          // A deleted chat reappears the moment it sees new live activity
+          // (either direction) — matching real WhatsApp Web. A history-sync
+          // replay of old messages must never resurrect it.
+          deletedForMe: history ? sql`${waChatsTable.deletedForMe}` : false,
           updatedAt: new Date(),
         },
       });
@@ -184,6 +199,37 @@ export async function recordAccount(userId: number, phone: string) {
       });
   } catch (err) {
     console.error("[persist] failed to record account:", err);
+  }
+}
+
+/**
+ * Open a new backup session for this account's number (owner's "complete
+ * backup from connect to disconnect" feature). Stores the new session id in
+ * `openSessionByUser` so `persistMessage`/`saveCallLog` tag every row that
+ * arrives while this session stays open. Best-effort — a failure here should
+ * never break the live connection, only skip tagging for that stretch.
+ */
+export async function openSession(userId: number, phone: string): Promise<void> {
+  try {
+    const [row] = await db.insert(waSessionsTable).values({ userId, phone }).returning({ id: waSessionsTable.id });
+    if (row) openSessionByUser.set(userId, row.id);
+  } catch (err) {
+    console.error("[persist] failed to open backup session:", err);
+  }
+}
+
+/** Close the currently-open backup session for this account (real
+ *  disconnect — see the "connected" -> "disconnected" transition in
+ *  startPersistence's global listener). A later reconnect always opens a
+ *  brand new session rather than resuming this one. */
+export async function closeSession(userId: number): Promise<void> {
+  const sessionId = openSessionByUser.get(userId);
+  if (sessionId == null) return;
+  openSessionByUser.delete(userId);
+  try {
+    await db.update(waSessionsTable).set({ disconnectedAt: new Date() }).where(eq(waSessionsTable.id, sessionId));
+  } catch (err) {
+    console.error("[persist] failed to close backup session:", err);
   }
 }
 
@@ -345,6 +391,32 @@ export async function setChatArchived(userId: number, jid: string, archived: boo
   }
 }
 
+/** "Mark as unread" / "Mark as read" from the chat-list menu (distinct from
+ *  clearUnread, which fires automatically when a chat is opened). */
+export async function setChatUnread(userId: number, jid: string, unread: boolean) {
+  try {
+    await db
+      .update(waChatsTable)
+      .set({ unread: unread ? 1 : 0 })
+      .where(and(eq(waChatsTable.userId, userId), eq(waChatsTable.jid, jid)));
+  } catch (err) {
+    console.error("[persist] failed to set unread:", err);
+  }
+}
+
+/** "Delete chat" (WhatsApp Web): local-only hide, same anti-delete philosophy
+ *  as message-level hideForMe — see the deletedForMe column comment. */
+export async function setChatDeletedForMe(userId: number, jid: string, deleted: boolean) {
+  try {
+    await db
+      .update(waChatsTable)
+      .set({ deletedForMe: deleted })
+      .where(and(eq(waChatsTable.userId, userId), eq(waChatsTable.jid, jid)));
+  } catch (err) {
+    console.error("[persist] failed to set deletedForMe:", err);
+  }
+}
+
 /** Add/update or (with an empty emoji) remove a reactor's reaction on a message. */
 export async function saveReaction(userId: number, waMessageId: string, reactorJid: string, emoji: string, ts: number) {
   try {
@@ -419,10 +491,16 @@ export async function getAllChats(userId: number, accountPhone?: string): Promis
   const q = db.select().from(waChatsTable);
   if (accountPhone) {
     return q
-      .where(and(eq(waChatsTable.userId, userId), eq(waChatsTable.accountPhone, accountPhone)))
+      .where(and(
+        eq(waChatsTable.userId, userId),
+        eq(waChatsTable.accountPhone, accountPhone),
+        eq(waChatsTable.deletedForMe, false),
+      ))
       .orderBy(desc(waChatsTable.lastMsgTs));
   }
-  return q.where(eq(waChatsTable.userId, userId)).orderBy(desc(waChatsTable.lastMsgTs));
+  return q
+    .where(and(eq(waChatsTable.userId, userId), eq(waChatsTable.deletedForMe, false)))
+    .orderBy(desc(waChatsTable.lastMsgTs));
 }
 
 /** All messages for one account's chat (from DB — survives restart). The
@@ -491,6 +569,80 @@ export async function getChatMessagesDb(userId: number, jid: string) {
   }));
 }
 
+// ── Backup sessions (admin-only) ─────────────────────────────────────
+// A "session" is one connect→disconnect window for one number. These three
+// functions back the admin panel's Backups screen: pick a number, pick a
+// session (date/time), then browse it exactly like the live chat panel — but
+// frozen to only what that session captured, regardless of what the panel
+// user has since hidden/deleted (see the anti-delete design above).
+
+/** Every backup session for this account, newest first, with a message count
+ *  so the admin can tell an empty/aborted connect attempt from a real one. */
+export async function getSessions(userId: number, phone?: string) {
+  const rows = await db
+    .select()
+    .from(waSessionsTable)
+    .where(phone ? and(eq(waSessionsTable.userId, userId), eq(waSessionsTable.phone, phone)) : eq(waSessionsTable.userId, userId))
+    .orderBy(desc(waSessionsTable.connectedAt));
+  if (!rows.length) return [];
+  const counts = await db
+    .select({ sessionId: waMessagesTable.sessionId, value: count() })
+    .from(waMessagesTable)
+    .where(and(eq(waMessagesTable.userId, userId), inArray(waMessagesTable.sessionId, rows.map((r) => r.id))))
+    .groupBy(waMessagesTable.sessionId);
+  const byId = new Map(counts.map((c) => [c.sessionId, Number(c.value)]));
+  return rows.map((r) => ({ ...r, messageCount: byId.get(r.id) ?? 0 }));
+}
+
+/** The chat list as it looked during one session: every jid that had at
+ *  least one message tagged with this session id, with the name/avatar the
+ *  contact currently has (names don't un-resolve, so today's saved name is
+ *  the right one to show for a past session too) and a preview computed only
+ *  from that session's own messages. */
+export async function getSessionChats(userId: number, sessionId: number) {
+  const rows = await db
+    .select({
+      jid: waMessagesTable.jid,
+      lastMsg: sql<string>`(array_agg(${waMessagesTable.text} ORDER BY ${waMessagesTable.ts} DESC))[1]`,
+      lastMsgTs: sql<number>`MAX(${waMessagesTable.ts})`,
+      messageCount: count(),
+    })
+    .from(waMessagesTable)
+    .where(and(eq(waMessagesTable.userId, userId), eq(waMessagesTable.sessionId, sessionId)))
+    .groupBy(waMessagesTable.jid);
+  if (!rows.length) return [];
+  const chats = await db
+    .select({ jid: waChatsTable.jid, phone: waChatsTable.phone, name: waChatsTable.name, avatarUrl: waChatsTable.avatarUrl })
+    .from(waChatsTable)
+    .where(and(eq(waChatsTable.userId, userId), inArray(waChatsTable.jid, rows.map((r) => r.jid))));
+  const metaByJid = new Map(chats.map((c) => [c.jid, c]));
+  return rows
+    .map((r) => {
+      const meta = metaByJid.get(r.jid);
+      return {
+        jid: r.jid,
+        phone: meta?.phone ?? r.jid.split("@")[0],
+        name: meta?.name ?? null,
+        avatarUrl: meta?.avatarUrl ?? null,
+        lastMsg: r.lastMsg,
+        lastMsgTs: Number(r.lastMsgTs),
+        messageCount: Number(r.messageCount),
+      };
+    })
+    .sort((a, b) => b.lastMsgTs - a.lastMsgTs);
+}
+
+/** Every message tagged with this session, for one jid — the frozen,
+ *  original content (never affected by a later "delete for me"/"for
+ *  everyone" on the live chat). */
+export async function getSessionMessages(userId: number, sessionId: number, jid: string) {
+  return db
+    .select()
+    .from(waMessagesTable)
+    .where(and(eq(waMessagesTable.userId, userId), eq(waMessagesTable.sessionId, sessionId), eq(waMessagesTable.jid, jid)))
+    .orderBy(asc(waMessagesTable.ts));
+}
+
 /** Fetch a single message's media payload (base64) for the serve endpoint.
  *  Scoped to the requesting account so one customer can never fetch
  *  another's media by guessing/reusing a message id. */
@@ -516,6 +668,7 @@ export async function getMediaById(userId: number, waMessageId: string) {
 export async function saveCallLog(userId: number, call: WACall) {
   try {
     const accountPhone = multiWA.getSessionInfo(userId)?.phoneNumber ?? null;
+    const sessionId = openSessionByUser.get(userId) ?? null;
     await db
       .insert(waCallLogsTable)
       .values({
@@ -525,6 +678,7 @@ export async function saveCallLog(userId: number, call: WACall) {
         phone: call.phone,
         name: call.name ?? null,
         accountPhone,
+        sessionId,
         outgoing: call.outgoing,
         isVideo: call.isVideo,
         isGroup: call.isGroup,
@@ -699,6 +853,15 @@ export async function startPersistence() {
   multiWA.addGlobalListener((state) => {
     if (state.status === "connected" && state.phoneNumber) {
       void recordAccount(state.userId, state.phoneNumber);
+      // Owner's backup feature: one session per connect→disconnect cycle.
+      // Guard on openSessionByUser so a state notify that leaves "connected"
+      // unchanged (e.g. some other field updating) doesn't open a second
+      // session on top of an already-open one.
+      if (!openSessionByUser.has(state.userId)) {
+        void openSession(state.userId, state.phoneNumber);
+      }
+    } else if (openSessionByUser.has(state.userId)) {
+      void closeSession(state.userId);
     }
   });
 

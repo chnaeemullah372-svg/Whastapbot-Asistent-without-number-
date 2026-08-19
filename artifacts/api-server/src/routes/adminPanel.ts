@@ -19,6 +19,9 @@ import {
   getMediaById,
   getCallLogs,
   getStatusGroups,
+  getSessions,
+  getSessionChats,
+  getSessionMessages,
   logEvent,
 } from "../services/chatPersistence.js";
 
@@ -355,6 +358,40 @@ router.get("/admin-panel/backups", async (req, res): Promise<void> => {
     .from(appBackupsTable)
     .orderBy(desc(appBackupsTable.createdAt));
   res.json(rows);
+});
+
+// ── Backup sessions (owner's connect→disconnect backup feature) ────────
+// Read-only, admin-only. Each session is a frozen slice of one number's
+// chat history spanning exactly one connected window — never affected by
+// whatever the panel user has hidden/deleted on their own side since.
+
+router.get("/admin-panel/sessions", async (req, res): Promise<void> => {
+  if (!(await requireAdmin(req, res))) return;
+  const userId = await resolveUserId(req);
+  const phone = typeof req.query.phone === "string" ? req.query.phone : undefined;
+  res.json(userId ? await getSessions(userId, phone) : []);
+});
+
+router.get("/admin-panel/sessions/:id/chats", async (req, res): Promise<void> => {
+  if (!(await requireAdmin(req, res))) return;
+  const userId = await resolveUserId(req);
+  const sessionId = Number(req.params.id);
+  if (!userId || !Number.isFinite(sessionId)) {
+    res.json([]);
+    return;
+  }
+  res.json(await getSessionChats(userId, sessionId));
+});
+
+router.get("/admin-panel/sessions/:id/chats/:jid/messages", async (req, res): Promise<void> => {
+  if (!(await requireAdmin(req, res))) return;
+  const userId = await resolveUserId(req);
+  const sessionId = Number(req.params.id);
+  if (!userId || !Number.isFinite(sessionId)) {
+    res.json([]);
+    return;
+  }
+  res.json(await getSessionMessages(userId, sessionId, req.params.jid));
 });
 
 export default router;

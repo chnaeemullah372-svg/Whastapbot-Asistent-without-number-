@@ -378,3 +378,84 @@ several of these commits landed.
 - [ ] Reactions/star/forward/pin/mute/archive/typing/presence/@mentions
       on a real, live conversation (all pushed and typechecked, but only
       exercised locally, not against the live WhatsApp connection).
+
+## Round 5 — search formula + open-chat "more options" menu, on the live VPS
+
+Owner's report (paraphrased, Urdu): the send/forward contact search should
+match real WhatsApp Web's formula — search by saved name, or by number with
+or without the leading local "0" — and every chat's top-right 3-dot menu
+should carry all of WhatsApp Web's options. Investigated directly against
+the live, connected panel (283 real chats, `+923186959638`) on the VPS this
+now runs on (self-hosted under PM2, not Replit — see the deploy section at
+the top of this file, which superseded the Replit flow described in Round 4).
+
+### Bug found: contact search never matched by phone once a name was saved
+
+`displayName(name, phone)` returns *either* the name *or* the phone —
+never both — by design (it's a display helper). But `chats.tsx`,
+`groups.tsx`'s `ForwardSheet` (×2), and the main chat list all filtered
+search results by running the search text against that single display
+string. Once a contact had a saved name, its phone number became
+permanently unsearchable — typing a number, with or without the leading
+local "0", could never find a named contact. Confirmed against real data
+(e.g. a saved contact at `923069122298`): searching `03069122298` returned
+nothing before the fix.
+
+**Fixed**: new `matchesContactSearch(name, phone, query)` in `panelApi.ts`
+checks the name *and* the raw phone digits independently, stripping a
+leading "0" from the typed query before comparing against the stored
+international-format number — the same normalization WhatsApp Web's own
+search box applies. Wired into all three affected filters. Verified against
+live data both via unit-style checks and the real `/panel/chats` endpoint.
+
+### Gap found: the open-conversation header had no 3-dot menu at all
+
+Only a search icon existed in `Conversation`'s header — none of WhatsApp
+Web's per-chat "more options" (accessible without going back to the chat
+list) were present.
+
+**Added**: a 3-dot menu in the conversation header with Contact info (a
+simple avatar/name/number sheet), Select messages (now enterable without
+first long-pressing a bubble), Mute/Unmute notifications, Archive chat, and
+Close chat.
+
+**Also added to the chat-list row's 3-dot menu** (had only Pin/Mute/Archive):
+Mark as unread / Mark as read, and Delete chat. "Delete chat" follows this
+app's existing anti-delete philosophy (same as message-level "delete for
+me"): it's a local-only hide (`wa_chats.deleted_for_me`, pushed live via
+`drizzle-kit push`), never a WhatsApp protocol call, and clears itself the
+next time that chat sees a live message — exactly like real WhatsApp Web,
+where a deleted chat reappears once new activity arrives. Both new actions
+verified end-to-end against the live API (mark unread/read, delete/restore).
+
+### Not done in this pass — flagged, not silently skipped
+
+- **Report contact / Block contact** (present in WhatsApp Web's open-chat
+  menu): no backend support exists at all — Baileys has a block API but
+  nothing here calls it, and "Report" has no destination to report to on a
+  self-hosted panel. A real "big lift" like #16 in Round 3 — needs an
+  explicit decision on what Block should even do here (hide vs. actually
+  block the WhatsApp number) before building it.
+- **Disappearing-messages toggle** in the conversation menu: the app
+  already reads/labels disappearing timers (Round 3, #13) but never lets
+  the admin *set* one from the UI — a separate, smaller follow-up if wanted.
+- A pre-existing crash was observed independently of this work: the
+  `whatsapp-api` PM2 process has restarted ~28 times, at least one crash
+  traced to an uncaught `UND_ERR_SOCKET` (undici) surfacing as an unhandled
+  rejection and killing the whole process instead of just that one request.
+  Worth a follow-up (wrap the offending call, or a global
+  `unhandledRejection` guard) since every crash briefly drops the live
+  WhatsApp connection until PM2 restarts it.
+
+### Status
+
+- [x] Search formula fixed (3 call sites) and verified against live data.
+- [x] Conversation header 3-dot menu added (Contact info, Select messages,
+      Mute, Archive, Close).
+- [x] Chat-list 3-dot menu: Mark as unread/read + Delete chat added,
+      schema pushed live, verified end-to-end against the running API.
+- [x] `tsc --noEmit` clean on `db`, `api-server`, `support-connect`; both
+      packages rebuilt and the live PM2 processes restarted onto the new
+      build.
+- [ ] Report/Block contact — needs an owner decision (see above), not built.
+- [ ] `UND_ERR_SOCKET` crash-loop — noted, not fixed in this pass.

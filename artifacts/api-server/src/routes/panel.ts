@@ -28,6 +28,8 @@ import {
   setChatPinned,
   setChatMuted,
   setChatArchived,
+  setChatUnread,
+  setChatDeletedForMe,
   logEvent,
 } from "../services/chatPersistence.js";
 
@@ -529,6 +531,21 @@ router.post("/panel/chats/:jid/archive", async (req, res): Promise<void> => {
   const user = await requirePanelUser(req, res);
   if (!user) return;
   await setChatArchived(user.id, req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+/** Mark as unread / read from the chat-list menu. */
+router.post("/panel/chats/:jid/unread", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setChatUnread(user.id, req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+/** Delete chat: local-only hide, same anti-delete philosophy as message-level
+ *  "delete for me" — reappears automatically on the next live message. */
+router.post("/panel/chats/:jid/delete", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setChatDeletedForMe(user.id, req.params.jid, !!req.body?.value);
   res.json({ success: true });
 });
 

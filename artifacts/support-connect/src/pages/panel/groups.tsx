@@ -3,7 +3,7 @@ import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import { Avatar } from "@/components/avatar";
 import {
-  panel, panelAuth, fmtTime, fmtClock, displayName,
+  panel, panelAuth, fmtTime, fmtClock, displayName, matchesContactSearch,
   type WAChat, type WAMessage, type WAStatus, type GroupInfo as GroupInfoT, type GroupParticipant,
 } from "@/lib/panelApi";
 import {
@@ -653,7 +653,7 @@ function GroupConversation({
 /** Pick a chat to forward a message's content to. */
 function ForwardSheet({ chats, onClose, onPick }: { chats: WAChat[]; onClose: () => void; onPick: (jid: string) => void }) {
   const [search, setSearch] = useState("");
-  const filtered = chats.filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()));
+  const filtered = chats.filter((c) => matchesContactSearch(c.name, c.phone, search));
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center max-w-md mx-auto">

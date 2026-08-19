@@ -47,3 +47,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Self-hosted VPS deploy — contains live secrets (DATABASE_URL, ADMIN_PASSWORD,
+# SESSION_SECRET). See CLAUDE.md's "Production deployment" section.
+ecosystem.config.cjs
+.env
+artifacts/.user-sessions/

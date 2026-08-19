@@ -262,3 +262,25 @@ export function formatPhone(phone: string | null | undefined) {
 export function displayName(name: string | null | undefined, phone: string | null | undefined) {
   return name && name.trim() ? name : formatPhone(phone);
 }
+
+/** WhatsApp-Web-style contact search: matches the saved name OR the raw phone
+ *  number, even when a name is shown instead of the number in the list.
+ *  Typing a local number without the leading "0" (or with it) still matches
+ *  the stored international-format number, the same way WhatsApp Web's
+ *  search box resolves a locally-typed number against a saved contact. */
+export function matchesContactSearch(
+  name: string | null | undefined,
+  phone: string | null | undefined,
+  query: string,
+): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  if ((name ?? "").toLowerCase().includes(q)) return true;
+  const phoneDigits = (phone ?? "").replace(/\D/g, "");
+  const qDigits = q.replace(/\D/g, "");
+  if (!phoneDigits || !qDigits) return false;
+  if (phoneDigits.includes(qDigits)) return true;
+  // A locally-typed number often carries a leading 0 the stored
+  // international-format number doesn't (e.g. "0300…" vs "9230…").
+  return qDigits.startsWith("0") && phoneDigits.includes(qDigits.slice(1));
+}

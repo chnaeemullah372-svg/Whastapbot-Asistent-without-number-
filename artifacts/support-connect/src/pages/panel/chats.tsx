@@ -3,7 +3,7 @@ import { useLocation } from "wouter";
 import Shell, { useRequirePanelAuth } from "./Shell";
 import { Avatar } from "@/components/avatar";
 import {
-  panel, panelAuth, fmtTime, fmtClock, phoneFromJid, displayName,
+  panel, panelAuth, fmtTime, fmtClock, phoneFromJid, displayName, matchesContactSearch, formatPhone,
   type WAChat, type WAMessage, type WAStatus,
 } from "@/lib/panelApi";
 import {
@@ -70,12 +70,17 @@ export default function Chats() {
   const [showArchived, setShowArchived] = useState(false);
   const [chatMenuFor, setChatMenuFor] = useState<string | null>(null);
 
-  async function toggleChatFlag(jid: string, flag: "pin" | "mute" | "archive", value: boolean) {
+  async function toggleChatFlag(jid: string, flag: "pin" | "mute" | "archive" | "unread" | "delete", value: boolean) {
     setChatMenuFor(null);
     try {
       await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${flag}`, { value });
       loadChats();
     } catch {}
+  }
+
+  function deleteChat(jid: string) {
+    if (!window.confirm("Delete this chat?")) { setChatMenuFor(null); return; }
+    toggleChatFlag(jid, "delete", true);
   }
 
   // A genuine 401 means the token was invalidated (e.g. password changed) — log
@@ -176,7 +181,7 @@ export default function Chats() {
   const archivedCount = individualChats.filter((c) => c.archived).length;
   const filtered = individualChats
     .filter((c) => (showArchived ? c.archived : !c.archived))
-    .filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()))
+    .filter((c) => matchesContactSearch(c.name, c.phone, search))
     // Pinned chats float to the top, exactly like WhatsApp; otherwise newest first.
     .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.lastMsgTs - a.lastMsgTs));
 
@@ -291,6 +296,12 @@ export default function Chats() {
                     </button>
                     <button onClick={() => toggleChatFlag(c.jid, "archive", !c.archived)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
                       <Archive className="w-3.5 h-3.5" /> {c.archived ? "Unarchive" : "Archive chat"}
+                    </button>
+                    <button onClick={() => toggleChatFlag(c.jid, "unread", !c.unread)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                      <Circle className="w-3.5 h-3.5" /> {c.unread ? "Mark as read" : "Mark as unread"}
+                    </button>
+                    <button onClick={() => deleteChat(c.jid)} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent text-destructive">
+                      <Trash2 className="w-3.5 h-3.5" /> Delete chat
                     </button>
                   </div>
                 )}
@@ -417,7 +428,12 @@ function Conversation({
   // Multi-select mode (WhatsApp-style): long-press a bubble to enter it,
   // tap more bubbles to add to the selection, act on all of them at once.
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const selectMode = selected.size > 0;
+  const [selectModeOn, setSelectModeOn] = useState(false);
+  const selectMode = selectModeOn || selected.size > 0;
+  const [convMenuOpen, setConvMenuOpen] = useState(false);
+  const [contactInfoOpen, setContactInfoOpen] = useState(false);
+  const [localMuted, setLocalMuted] = useState(!!chat?.muted);
+  useEffect(() => setLocalMuted(!!chat?.muted), [jid, chat?.muted]);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const justEnteredSelectMode = useRef(false);
   const suppressNextClick = useRef(false);
@@ -664,7 +680,20 @@ function Conversation({
       return next;
     });
   }
-  function cancelSelect() { setSelected(new Set()); }
+  function cancelSelect() { setSelected(new Set()); setSelectModeOn(false); }
+
+  async function toggleMute() {
+    const value = !localMuted;
+    setLocalMuted(value);
+    setConvMenuOpen(false);
+    try { await panel.post(`/panel/chats/${encodeURIComponent(jid)}/mute`, { value }); } catch {}
+  }
+
+  async function archiveChat() {
+    setConvMenuOpen(false);
+    try { await panel.post(`/panel/chats/${encodeURIComponent(jid)}/archive`, { value: true }); } catch {}
+    onBack();
+  }
 
   // WhatsApp-style swipe-to-reply (drag right past a threshold) + long-press
   // to enter multi-select — both live on the same bubble pointer handlers so
@@ -797,7 +826,48 @@ function Conversation({
           <button onClick={() => setSearchOpen((v) => !v)} className="p-1" aria-label="Search in chat">
             <Search className="w-5 h-5" />
           </button>
+          <div className="relative">
+            <button onClick={() => setConvMenuOpen((v) => !v)} className="p-1" aria-label="More options">
+              <MoreVertical className="w-5 h-5" />
+            </button>
+            {convMenuOpen && (
+              <div className="absolute top-9 right-0 flex flex-col bg-popover border border-border rounded-lg shadow-lg z-20 overflow-hidden min-w-[190px] text-sm text-foreground">
+                <button onClick={() => { setContactInfoOpen(true); setConvMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                  Contact info
+                </button>
+                <button onClick={() => { setSelectModeOn(true); setConvMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                  Select messages
+                </button>
+                <button onClick={toggleMute} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                  {localMuted ? "Unmute notifications" : "Mute notifications"}
+                </button>
+                <button onClick={archiveChat} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                  Archive chat
+                </button>
+                <button onClick={() => { setConvMenuOpen(false); onBack(); }} className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent">
+                  Close chat
+                </button>
+              </div>
+            )}
+          </div>
         </header>
+      )}
+
+      {contactInfoOpen && (
+        <div className="fixed inset-0 z-40 flex items-end justify-center max-w-md mx-auto">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setContactInfoOpen(false)} />
+          <div className="relative w-full bg-card rounded-t-2xl p-5 space-y-4 animate-in slide-in-from-bottom duration-200">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-lg">Contact info</h3>
+              <button onClick={() => setContactInfoOpen(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="flex flex-col items-center gap-2 py-2">
+              <Avatar url={chat?.avatarUrl} label={title} size={80} textClassName="text-2xl" />
+              <p className="font-semibold text-base">{title}</p>
+              {chat?.phone && <p className="text-sm text-muted-foreground">{formatPhone(chat.phone)}</p>}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* In-chat search */}
@@ -1049,7 +1119,7 @@ function Conversation({
 /** Pick a chat to forward a message's content to — WhatsApp-style contact/chat picker. */
 function ForwardSheet({ chats, onClose, onPick }: { chats: WAChat[]; onClose: () => void; onPick: (jid: string) => void }) {
   const [search, setSearch] = useState("");
-  const filtered = chats.filter((c) => displayName(c.name, c.phone).toLowerCase().includes(search.toLowerCase()));
+  const filtered = chats.filter((c) => matchesContactSearch(c.name, c.phone, search));
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center max-w-md mx-auto">
