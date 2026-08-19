@@ -12,21 +12,31 @@ import {
   waMessagesTable,
 } from "@workspace/db";
 import { createHash, createHmac } from "crypto";
-import { multiWA } from "../services/multiWhatsapp.js";
+import { multiWA, MEDIA_MAX_BYTES } from "../services/multiWhatsapp.js";
 import {
-  PANEL_USER_ID,
   getAllChats,
   getChatMessagesDb,
   getMediaById,
+  getMessageForForward,
   getCallLogs,
   getStatusGroups,
+  getStarredMessages,
   clearUnread,
   markDeleted,
+  hideForMe,
+  setStarred,
+  setChatPinned,
+  setChatMuted,
+  setChatArchived,
   logEvent,
 } from "../services/chatPersistence.js";
 
 const router: IRouter = Router();
-const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+/** In-memory upload (no temp file) for media the admin sends OUT — the buffer
+ *  goes straight to Baileys and, capped, into the DB as base64, exactly like
+ *  a downloaded incoming attachment. */
+const uploadMedia = multer({ storage: multer.memoryStorage(), limits: { fileSize: MEDIA_MAX_BYTES } });
 
 function hashPassword(password: string): string {
   return createHash("sha256").update(password).digest("hex");
@@ -44,9 +54,8 @@ function generateToken(userId: number, passwordHash: string): string {
 
 async function getUserFromToken(token: string) {
   if (!token.startsWith(PANEL_TOKEN_PREFIX)) return null;
-  // Check the token against EVERY panel user, not just an arbitrary first row.
-  // With a pending signup there can be >1 row; `limit(1)` (unordered) could pick
-  // the wrong user, fail the match, and spuriously 401 → log the user out.
+  // Check the token against EVERY panel user (there can be many now), not
+  // just an arbitrary first row.
   const users = await db.select().from(panelUserTable);
   for (const user of users) {
     if (generateToken(user.id, user.passwordHash) === token) return user;
@@ -54,6 +63,9 @@ async function getUserFromToken(token: string) {
   return null;
 }
 
+/** Resolves the authenticated account for this request — every route below
+ *  MUST use the returned `user.id` (never a hardcoded id) to scope
+ *  WhatsApp-session and DB access to that one account. */
 async function requirePanelUser(req: any, res: any) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) {
@@ -74,13 +86,16 @@ async function requirePanelUser(req: any, res: any) {
 
 // ── Auth ──────────────────────────────────────────────────────────
 
-/** Does an account already exist? (drives signup vs login on the client) */
+/** Does any account already exist? Used only to decide the client's very
+ *  first-run screen (signup vs login); signing up is otherwise always open —
+ *  this is a multi-account panel now. */
 router.get("/panel/exists", async (_req, res): Promise<void> => {
   const [user] = await db.select().from(panelUserTable).limit(1);
   res.json({ exists: !!user, approved: user?.approved ?? false });
 });
 
-/** Sign up a new user. Requires admin approval before access is granted. */
+/** Sign up a new account. Multiple accounts are supported — each gets its
+ *  own isolated WhatsApp connection and chats once an admin approves it. */
 router.post("/panel/signup", async (req, res): Promise<void> => {
   const username = String(req.body?.username ?? "").trim();
   const password = String(req.body?.password ?? "");
@@ -88,7 +103,6 @@ router.post("/panel/signup", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Username (3+) and password (4+) required" });
     return;
   }
-  // Check for duplicate username only
   const [existingUsername] = await db.select().from(panelUserTable).where(eq(panelUserTable.username, username));
   if (existingUsername) {
     res.status(409).json({ error: "This username is already taken. Please choose another." });
@@ -102,7 +116,7 @@ router.post("/panel/signup", async (req, res): Promise<void> => {
   res.json({ success: true, approved: user.approved, message: "Account created. Waiting for admin approval." });
 });
 
-/** Log in the user. Must be approved. */
+/** Log in an account. Must be approved. */
 router.post("/panel/login", async (req, res): Promise<void> => {
   const username = String(req.body?.username ?? "").trim();
   const password = String(req.body?.password ?? "");
@@ -129,66 +143,74 @@ router.get("/panel/me", async (req, res): Promise<void> => {
 // ── WhatsApp connection ───────────────────────────────────────────
 
 router.get("/panel/wa/status", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  res.json(multiWA.getState(PANEL_USER_ID));
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(multiWA.getState(user.id));
 });
 
 router.post("/panel/wa/connect-qr", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  await multiWA.connectQR(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await multiWA.connectQR(user.id);
   await logEvent("WhatsApp QR connect requested", "info", "whatsapp");
-  res.json(multiWA.getState(PANEL_USER_ID));
+  res.json(multiWA.getState(user.id));
 });
 
 router.post("/panel/wa/connect-phone", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
   const phone = String(req.body?.phone ?? "").replace(/\D/g, "");
   if (!phone) {
     res.status(400).json({ error: "Phone number required" });
     return;
   }
   const settings = await getSettings();
-  await multiWA.connectPhone(PANEL_USER_ID, phone, settings.pairingBrandCode);
+  await multiWA.connectPhone(user.id, phone, settings.pairingBrandCode);
   await logEvent(`WhatsApp pairing-code connect requested for ${phone}`, "info", "whatsapp");
-  res.json(multiWA.getState(PANEL_USER_ID));
+  res.json(multiWA.getState(user.id));
 });
 
 router.post("/panel/wa/disconnect", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.disconnect(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.disconnect(user.id);
   await logEvent("WhatsApp disconnected", "warn", "whatsapp");
-  res.json(multiWA.getState(PANEL_USER_ID));
+  res.json(multiWA.getState(user.id));
 });
 
 /** Auto-fix / reconnect: fresh start (clear + reconnect QR). */
 router.post("/panel/wa/fix", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.freshStart(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.freshStart(user.id);
   await logEvent("WhatsApp auto-fix (fresh start) triggered", "warn", "whatsapp");
   res.json({ success: true });
 });
 
 /** Clear session (wipe creds). */
 router.post("/panel/wa/clear", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.clearSession(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.clearSession(user.id);
   await logEvent("WhatsApp session cleared", "warn", "whatsapp");
   res.json({ success: true });
 });
 
 /** Restart the WhatsApp socket using saved credentials (no wipe). */
 router.post("/panel/wa/restart", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.disconnect(PANEL_USER_ID);
-  await multiWA.connectQR(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.disconnect(user.id);
+  await multiWA.connectQR(user.id);
   await logEvent("WhatsApp service restarted", "info", "whatsapp");
-  res.json(multiWA.getState(PANEL_USER_ID));
+  res.json(multiWA.getState(user.id));
 });
 
 /** Complete logout: disconnect WA socket + wipe session files + panel logout signal. */
 router.post("/panel/wa/full-logout", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.clearSession(PANEL_USER_ID);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.clearSession(user.id);
   await logEvent("WhatsApp full logout — session wiped", "warn", "whatsapp");
   res.json({ success: true });
 });
@@ -209,20 +231,22 @@ router.post("/panel/server/restart", async (req, res): Promise<void> => {
 
 /** Certificate / session info. */
 router.get("/panel/wa/certificate", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  res.json(multiWA.getSessionInfo(PANEL_USER_ID));
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(multiWA.getSessionInfo(user.id));
 });
 
 // ── Chats ─────────────────────────────────────────────────────────
 
 router.get("/panel/chats", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
   // Only return chats for the currently connected WhatsApp number.
   // This prevents old-number chats from leaking into the panel when a new
   // number connects: each number's chat history is isolated by accountPhone.
-  const info = multiWA.getSessionInfo(PANEL_USER_ID);
+  const info = multiWA.getSessionInfo(user.id);
   const accountPhone = info?.phoneNumber ?? null;
-  res.json(await getAllChats(PANEL_USER_ID, accountPhone ?? undefined));
+  res.json(await getAllChats(user.id, accountPhone ?? undefined));
 });
 
 /**
@@ -236,7 +260,9 @@ router.get("/panel/events", async (req, res): Promise<void> => {
   if (typeof queryToken === "string" && !req.headers.authorization) {
     req.headers.authorization = `Bearer ${queryToken}`;
   }
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const myId = user.id;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -252,16 +278,37 @@ router.get("/panel/events", async (req, res): Promise<void> => {
 
   send("ready", { ts: Date.now() });
 
-  const offPersist = multiWA.addPersistListener((_uid, jid, _phone, msg) => {
+  // Every listener below is GLOBAL (fires for every connected account), so
+  // each one MUST filter to `myId` before writing to this client's stream —
+  // otherwise one customer's messages/calls/reactions would leak into
+  // another customer's browser.
+  const offPersist = multiWA.addPersistListener((uid, jid, _phone, msg) => {
+    if (uid !== myId) return;
     send("message", { jid, fromMe: msg.fromMe, ts: msg.ts });
   });
-  const offDelete = multiWA.addDeleteListener((_uid, waMessageId) => {
+  const offDelete = multiWA.addDeleteListener((uid, waMessageId) => {
+    if (uid !== myId) return;
     send("delete", { waMessageId });
   });
-  const offCall = multiWA.addCallListener((_uid, call) => {
+  // Sent/delivered/read (single/double/blue tick) updates — without this the
+  // open conversation only learned about a tick change on its next slow poll.
+  const offStatus = multiWA.addStatusListener((uid, update) => {
+    if (uid !== myId) return;
+    send("status", { waMessageId: update.waMessageId, jid: update.jid, status: update.status });
+  });
+  const offCall = multiWA.addCallListener((uid, call) => {
+    if (uid !== myId) return;
     send("call", { callId: call.callId, outcome: call.outcome, ts: call.ts });
   });
-  const offState = multiWA.addUserListener(PANEL_USER_ID, (state) => {
+  const offReaction = multiWA.addReactionListener((uid, jid, waMessageId, reactorJid, emoji, ts) => {
+    if (uid !== myId) return;
+    send("reaction", { jid, waMessageId, reactorJid, emoji, ts });
+  });
+  const offPresence = multiWA.addPresenceListener((uid, jid, presence, lastSeen) => {
+    if (uid !== myId) return;
+    send("presence", { jid, presence, lastSeen });
+  });
+  const offState = multiWA.addUserListener(myId, (state) => {
     send("state", { status: state.status });
   });
 
@@ -276,6 +323,9 @@ router.get("/panel/events", async (req, res): Promise<void> => {
     offDelete();
     offCall();
     offState();
+    offStatus();
+    offReaction();
+    offPresence();
     res.end();
   });
 });
@@ -285,19 +335,22 @@ router.get("/panel/events", async (req, res): Promise<void> => {
 /** Call log: incoming / missed / rejected / accepted. Duration is generally
  *  unavailable from a linked device, so the client shows that honestly. */
 router.get("/panel/calls", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  res.json(await getCallLogs(PANEL_USER_ID));
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(await getCallLogs(user.id));
 });
 
 /** Status (stories) grouped by the contact who posted them. */
 router.get("/panel/status", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  res.json(await getStatusGroups(PANEL_USER_ID));
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(await getStatusGroups(user.id));
 });
 
 router.get("/panel/chats/:jid/messages", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  const rows = await getChatMessagesDb(PANEL_USER_ID, req.params.jid);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const rows = await getChatMessagesDb(user.id, req.params.jid);
   res.json(rows);
 });
 
@@ -308,8 +361,9 @@ router.get("/panel/media/:msgId", async (req, res): Promise<void> => {
   if (typeof queryToken === "string" && !req.headers.authorization) {
     req.headers.authorization = `Bearer ${queryToken}`;
   }
-  if (!(await requirePanelUser(req, res))) return;
-  const row = await getMediaById(PANEL_USER_ID, req.params.msgId);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const row = await getMediaById(user.id, req.params.msgId);
   if (!row || !row.media) {
     res.status(404).json({ error: "No media" });
     return;
@@ -324,24 +378,39 @@ router.get("/panel/media/:msgId", async (req, res): Promise<void> => {
 });
 
 router.post("/panel/chats/:jid/read", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  multiWA.markRead(PANEL_USER_ID, req.params.jid);
-  await clearUnread(PANEL_USER_ID, req.params.jid);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  multiWA.markRead(user.id, req.params.jid);
+  await clearUnread(user.id, req.params.jid);
+  // Opening a chat is also when WhatsApp expects a presence subscription —
+  // without this, most 1:1 chats never push online/typing updates at all.
+  void multiWA.subscribePresence(user.id, req.params.jid);
   res.json({ success: true });
 });
 
-/** Tell WhatsApp we're composing (or done composing) in this chat, so the
- *  other side sees the "typing…" indicator. */
+/** Current cached online/typing state for a chat (SSE only pushes changes,
+ *  so the UI needs this once when a conversation first opens). */
+router.get("/panel/chats/:jid/presence", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(multiWA.getPresence(user.id, req.params.jid) ?? null);
+});
+
+/** Tell WhatsApp we're typing (or done typing) a reply — the composing/paused
+ *  indicator real WhatsApp Web sends while the admin is writing. */
 router.post("/panel/chats/:jid/typing", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  const composing = req.body?.composing === true || req.body?.composing === "true";
-  await multiWA.setTyping(PANEL_USER_ID, req.params.jid, composing);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await multiWA.setTyping(user.id, req.params.jid, !!req.body?.composing);
   res.json({ success: true });
 });
 
-/** Send a message to a phone number OR a group JID (creates the chat if new). */
+/** Send a message to a phone number OR a group JID (creates the chat if new).
+ *  Optionally carries a WhatsApp-style quoted reply (quotedId/quotedFromMe/
+ *  quotedText), the way tapping "Reply" on a message in the panel works. */
 router.post("/panel/send", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
   const jid   = String(req.body?.jid  ?? "").trim();          // full JID for groups
   const phone = String(req.body?.phone ?? "").replace(/\D/g, "");
   const text  = String(req.body?.text  ?? "").trim();
@@ -355,54 +424,257 @@ router.post("/panel/send", async (req, res): Promise<void> => {
     : undefined;
   try {
     const waMessageId = jid
-      ? await multiWA.sendToJid(PANEL_USER_ID, jid, text, quoted)
-      : await multiWA.sendMessage(PANEL_USER_ID, phone, text, quoted);
+      ? await multiWA.sendToJid(user.id, jid, text, quoted)
+      : await multiWA.sendMessage(user.id, phone, text, quoted);
     res.json({ success: true, waMessageId });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to send" });
   }
 });
 
-/** Send a photo/video/voice-note/document (multipart upload) to a jid. */
-router.post("/panel/send-media", mediaUpload.single("file"), async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  const jid = String(req.body?.jid ?? "").trim();
-  const kind = String(req.body?.kind ?? "") as "image" | "video" | "audio" | "document";
-  const file = (req as any).file as Express.Multer.File | undefined;
-  if (!jid || !file || !["image", "video", "audio", "document"].includes(kind)) {
-    res.status(400).json({ error: "jid, kind, and file required" });
-    return;
-  }
-  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
-  const quoted = quotedId
-    ? { waMessageId: quotedId, fromMe: req.body?.quotedFromMe === true || req.body?.quotedFromMe === "true", text: String(req.body?.quotedText ?? "") }
-    : undefined;
-  try {
-    const waMessageId = await multiWA.sendMedia(PANEL_USER_ID, jid, file.buffer, file.mimetype, kind, {
-      caption: req.body?.caption ? String(req.body.caption) : undefined,
-      fileName: file.originalname,
-      quoted,
-    });
-    res.json({ success: true, waMessageId });
-  } catch (err: any) {
-    res.status(400).json({ error: err?.message ?? "Failed to send file" });
-  }
-});
-
 /** Delete a message for everyone. */
 router.delete("/panel/chats/:jid/:msgId", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
   const fromMe = req.query.fromMe === "true";
   try {
-    await multiWA.deleteForEveryone(PANEL_USER_ID, req.params.jid, req.params.msgId, fromMe);
-    await markDeleted(PANEL_USER_ID, req.params.msgId);
+    await multiWA.deleteForEveryone(user.id, req.params.jid, req.params.msgId, fromMe);
+    await markDeleted(user.id, req.params.msgId);
     res.json({ success: true });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "Failed to delete" });
   }
 });
 
+/** "Delete for me": local-only hide, never a WhatsApp protocol call. */
+router.post("/panel/chats/:jid/:msgId/hide", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await hideForMe(user.id, req.params.msgId);
+  res.json({ success: true });
+});
+
+/** Star / unstar a message. */
+router.post("/panel/chats/:jid/:msgId/star", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setStarred(user.id, req.params.msgId, !!req.body?.starred);
+  res.json({ success: true });
+});
+
+/** All starred messages across every chat. */
+router.get("/panel/starred", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  res.json(await getStarredMessages(user.id));
+});
+
+/** React to (or, with emoji: "", remove a reaction from) a message. */
+router.post("/panel/chats/:jid/:msgId/react", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const emoji = String(req.body?.emoji ?? "");
+  const fromMe = !!req.body?.fromMe;
+  const participant = req.body?.participant ? String(req.body.participant) : undefined;
+  try {
+    await multiWA.sendReaction(user.id, req.params.jid, req.params.msgId, fromMe, emoji, participant);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to react" });
+  }
+});
+
+/** Forward an existing message's content to another chat. */
+router.post("/panel/chats/:jid/:msgId/forward", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const toJid = String(req.body?.toJid ?? "").trim();
+  if (!toJid) {
+    res.status(400).json({ error: "toJid required" });
+    return;
+  }
+  const source = await getMessageForForward(user.id, req.params.msgId);
+  if (!source) {
+    res.status(404).json({ error: "Message not found" });
+    return;
+  }
+  try {
+    const waMessageId = await multiWA.forwardMessage(user.id, toJid, {
+      text: source.text,
+      media: source.media ?? undefined,
+      mediaMime: source.mediaMime ?? undefined,
+      mediaKind: source.mediaKind ?? undefined,
+      fileName: source.fileName ?? undefined,
+    });
+    res.json({ success: true, waMessageId });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to forward" });
+  }
+});
+
+/** Pin / mute / archive a chat — chat-list organization, no WhatsApp protocol call. */
+router.post("/panel/chats/:jid/pin", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setChatPinned(user.id, req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+router.post("/panel/chats/:jid/mute", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setChatMuted(user.id, req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+router.post("/panel/chats/:jid/archive", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  await setChatArchived(user.id, req.params.jid, !!req.body?.value);
+  res.json({ success: true });
+});
+
+/** Send a photo/video/voice-note/document. Accepts either `jid` (groups) or
+ *  `phone` (1:1) the same way /panel/send does, plus an optional quote. */
+router.post("/panel/send-media", uploadMedia.single("file"), async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "file required" });
+    return;
+  }
+  const jid = String(req.body?.jid ?? "").trim();
+  const phone = String(req.body?.phone ?? "").replace(/\D/g, "");
+  const targetJid = jid || (phone ? `${phone}@s.whatsapp.net` : "");
+  if (!targetJid) {
+    res.status(400).json({ error: "phone (or jid) required" });
+    return;
+  }
+  const kindRaw = String(req.body?.kind ?? "");
+  const kind = (["image", "video", "audio", "document"].includes(kindRaw) ? kindRaw : "document") as
+    "image" | "video" | "audio" | "document";
+  const quotedId = req.body?.quotedId ? String(req.body.quotedId) : undefined;
+  const quoted = quotedId
+    ? { waMessageId: quotedId, fromMe: !!req.body?.quotedFromMe, text: String(req.body?.quotedText ?? "") }
+    : undefined;
+  try {
+    const waMessageId = await multiWA.sendMedia(user.id, targetJid, file.buffer, file.mimetype, kind, {
+      caption: req.body?.caption ? String(req.body.caption) : undefined,
+      fileName: file.originalname,
+      quoted,
+    });
+    res.json({ success: true, waMessageId });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to send media" });
+  }
+});
+
+// ── Group management ────────────────────────────────────────────────
+
+router.get("/panel/groups/:jid/info", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  try {
+    res.json(await multiWA.getGroupInfo(user.id, req.params.jid));
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to load group info" });
+  }
+});
+
+router.post("/panel/groups/:jid/participants", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const jids: string[] = Array.isArray(req.body?.jids) ? req.body.jids.map(String) : [];
+  const action = String(req.body?.action ?? "");
+  if (!jids.length || !["add", "remove", "promote", "demote"].includes(action)) {
+    res.status(400).json({ error: "jids[] and a valid action required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupParticipants(user.id, req.params.jid, jids, action as any);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update participants" });
+  }
+});
+
+router.put("/panel/groups/:jid/subject", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const subject = String(req.body?.subject ?? "").trim();
+  if (!subject) {
+    res.status(400).json({ error: "subject required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupSubject(user.id, req.params.jid, subject);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group name" });
+  }
+});
+
+router.put("/panel/groups/:jid/description", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  try {
+    await multiWA.updateGroupDescription(user.id, req.params.jid, String(req.body?.description ?? ""));
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group description" });
+  }
+});
+
+router.post("/panel/groups/:jid/icon", uploadMedia.single("file"), async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  if (!req.file) {
+    res.status(400).json({ error: "file required" });
+    return;
+  }
+  try {
+    await multiWA.updateGroupIcon(user.id, String(req.params.jid), req.file.buffer);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to update group icon" });
+  }
+});
+
+router.get("/panel/groups/:jid/invite", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  try {
+    const code = await multiWA.getGroupInviteCode(user.id, req.params.jid);
+    res.json({ code, link: `https://chat.whatsapp.com/${code}` });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to fetch invite link" });
+  }
+});
+
+router.post("/panel/groups/:jid/invite/revoke", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  try {
+    const code = await multiWA.revokeGroupInviteCode(user.id, req.params.jid);
+    res.json({ code, link: `https://chat.whatsapp.com/${code}` });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to reset invite link" });
+  }
+});
+
+router.post("/panel/groups/:jid/leave", async (req, res): Promise<void> => {
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  try {
+    await multiWA.leaveGroup(user.id, req.params.jid);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "Failed to leave group" });
+  }
+});
+
 // ── Settings ──────────────────────────────────────────────────────
+// Shared/global app settings (pairing brand code, theme default, backup
+// schedule) — intentionally one row for the whole install, not per-account.
 
 async function getSettings() {
   let [s] = await db.select().from(appSettingsTable).where(eq(appSettingsTable.id, 1));
@@ -447,6 +719,8 @@ router.put("/panel/settings", async (req, res): Promise<void> => {
 });
 
 // ── Logs ──────────────────────────────────────────────────────────
+// Shared system log (connection/auth/admin events across all accounts) —
+// intentionally not per-account, same as before.
 
 router.get("/panel/logs", async (req, res): Promise<void> => {
   if (!(await requirePanelUser(req, res))) return;
@@ -456,15 +730,18 @@ router.get("/panel/logs", async (req, res): Promise<void> => {
 });
 
 // ── Backup & Restore ──────────────────────────────────────────────
+// Scoped to the requesting account only — a customer's backup must never
+// include another customer's chats.
 
 router.post("/panel/backup", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
-  const chats = await db.select().from(waChatsTable);
-  const messages = await db.select().from(waMessagesTable);
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
+  const chats = await db.select().from(waChatsTable).where(eq(waChatsTable.userId, user.id));
+  const messages = await db.select().from(waMessagesTable).where(eq(waMessagesTable.userId, user.id));
   const settings = await getSettings();
-  const payloadObj = { version: 1, createdAt: new Date().toISOString(), chats, messages, settings };
+  const payloadObj = { version: 2, userId: user.id, createdAt: new Date().toISOString(), chats, messages, settings };
   const payload = JSON.stringify(payloadObj);
-  const filename = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  const filename = `backup-${user.username}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
   const [backup] = await db
     .insert(appBackupsTable)
     .values({
@@ -476,7 +753,7 @@ router.post("/panel/backup", async (req, res): Promise<void> => {
       note: String(req.body?.note ?? "") || null,
     })
     .returning();
-  await logEvent(`Backup created: ${filename} (${chats.length} chats, ${messages.length} msgs)`, "info", "backup");
+  await logEvent(`Backup created for ${user.username}: ${filename} (${chats.length} chats, ${messages.length} msgs)`, "info", "backup");
   res.json({ id: backup.id, filename: backup.filename, sizeBytes: backup.sizeBytes, chatCount: backup.chatCount, messageCount: backup.messageCount, createdAt: backup.createdAt });
 });
 
@@ -510,7 +787,8 @@ router.get("/panel/backups/:id/download", async (req, res): Promise<void> => {
 });
 
 router.post("/panel/backups/:id/restore", async (req, res): Promise<void> => {
-  if (!(await requirePanelUser(req, res))) return;
+  const user = await requirePanelUser(req, res);
+  if (!user) return;
   const [backup] = await db.select().from(appBackupsTable).where(eq(appBackupsTable.id, Number(req.params.id)));
   if (!backup) {
     res.status(404).json({ error: "Backup not found" });
@@ -523,15 +801,21 @@ router.post("/panel/backups/:id/restore", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Corrupt backup payload" });
     return;
   }
-  // Replace chats + messages with the backup snapshot.
-  await db.delete(waMessagesTable);
-  await db.delete(waChatsTable);
+  // Only ever replace THIS account's own rows, never another account's —
+  // and only allow restoring a backup this same account created.
+  if (data.userId != null && data.userId !== user.id) {
+    res.status(403).json({ error: "This backup belongs to a different account" });
+    return;
+  }
+  await db.delete(waMessagesTable).where(eq(waMessagesTable.userId, user.id));
+  await db.delete(waChatsTable).where(eq(waChatsTable.userId, user.id));
   if (Array.isArray(data.chats) && data.chats.length) {
-    await db.insert(waChatsTable).values(data.chats).onConflictDoNothing();
+    await db.insert(waChatsTable).values(data.chats.map((c: any) => ({ ...c, userId: user.id }))).onConflictDoNothing();
   }
   if (Array.isArray(data.messages) && data.messages.length) {
     // Strip serial ids so they re-generate; keep waMessageId for dedupe.
     const msgs = data.messages.map((m: any) => ({
+      userId: user.id,
       waMessageId: m.waMessageId,
       jid: m.jid,
       text: m.text,
@@ -548,7 +832,7 @@ router.post("/panel/backups/:id/restore", async (req, res): Promise<void> => {
     }));
     await db.insert(waMessagesTable).values(msgs).onConflictDoNothing();
   }
-  await logEvent(`Backup restored: ${backup.filename}`, "warn", "backup");
+  await logEvent(`Backup restored for ${user.username}: ${backup.filename}`, "warn", "backup");
   res.json({ success: true, restoredChats: data.chats?.length ?? 0, restoredMessages: data.messages?.length ?? 0 });
 });
 
