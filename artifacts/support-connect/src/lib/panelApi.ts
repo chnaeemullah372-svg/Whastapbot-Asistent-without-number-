@@ -135,6 +135,7 @@ export interface WAMessage {
   mediaMime: string | null;
   fileName: string | null;
   hasMedia: boolean;
+  participant: string | null; // group sender's jid — null for 1:1 chats
   starred: boolean;
   edited: boolean;
   viewOnce: boolean;
@@ -160,6 +161,7 @@ export interface WACallLog {
   rawStatus: string | null;
   ts: number;
   durationSec: number | null;
+  avatarUrl: string | null;
 }
 
 export interface StatusItem {

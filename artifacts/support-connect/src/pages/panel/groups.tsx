@@ -9,7 +9,7 @@ import {
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
   Loader2, MoreVertical, Circle, Users2, Reply, X, Star, Forward, Paperclip,
-  CircleDashed, Timer, Copy, LogOut, Shield, ShieldOff, UserMinus, Pencil, Link2, Mic,
+  CircleDashed, Timer, Copy, LogOut, Shield, ShieldOff, UserMinus, Pencil, Link2, Mic, Camera,
 } from "lucide-react";
 
 const PLACEHOLDER_RE = /^(📷|📹|🎵|📄|🩷|📎)/;
@@ -388,9 +388,15 @@ function GroupConversation({
 
   async function react(msg: WAMessage, emoji: string) {
     setMenuFor(null);
+    // Same toggle behavior as the 1:1 chat view (see chats.tsx) — tapping an
+    // already-active reaction removes it instead of re-sending it.
+    const alreadyReacted = msg.reactions?.some((r) => r.emoji === emoji && r.byMe);
     try {
       await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/react`, {
-        emoji, fromMe: msg.fromMe, participant: msg.fromMe ? undefined : jid,
+        // A group reaction's protocol key needs the ORIGINAL message's real
+        // sender jid, not the group's own jid — using the group jid here sent
+        // a malformed reaction key for every message not sent by us.
+        emoji: alreadyReacted ? "" : emoji, fromMe: msg.fromMe, participant: msg.fromMe ? undefined : msg.participant,
       });
       load();
     } catch {}
@@ -705,6 +711,9 @@ function GroupInfoScreen({ jid, chat, onClose, onLeft }: { jid: string; chat?: W
   const [invite, setInvite] = useState<{ code: string; link: string } | null>(null);
   const [participantMenuFor, setParticipantMenuFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [iconPreview, setIconPreview] = useState<string | null>(null);
+  const [iconUploading, setIconUploading] = useState(false);
+  const iconInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
     panel.get(`/panel/groups/${encodeURIComponent(jid)}/info`)
@@ -782,6 +791,25 @@ function GroupInfoScreen({ jid, chat, onClose, onLeft }: { jid: string; chat?: W
     }
   }
 
+  async function pickIcon(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setIconPreview(URL.createObjectURL(file));
+    setIconUploading(true);
+    setError("");
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      await panel.postForm(`/panel/groups/${encodeURIComponent(jid)}/icon`, form);
+    } catch (err: any) {
+      setError(err?.message || "Failed to update group icon");
+      setIconPreview(null);
+    } finally {
+      setIconUploading(false);
+    }
+  }
+
   async function leaveGroup() {
     if (!confirm("Leave this group?")) return;
     setBusy(true);
@@ -809,7 +837,19 @@ function GroupInfoScreen({ jid, chat, onClose, onLeft }: { jid: string; chat?: W
           <>
             {error && <p className="text-xs text-destructive px-4 pt-3">{error}</p>}
             <div className="flex flex-col items-center gap-2 py-6 border-b border-border">
-              <Avatar url={chat?.avatarUrl} icon={<Users2 className="w-10 h-10" />} size={96} />
+              <input ref={iconInputRef} type="file" accept="image/*" className="hidden" onChange={pickIcon} />
+              <button
+                type="button"
+                onClick={() => iconInputRef.current?.click()}
+                disabled={iconUploading}
+                className="relative rounded-full disabled:opacity-70"
+                aria-label="Change group icon"
+              >
+                <Avatar url={iconPreview || chat?.avatarUrl} icon={<Users2 className="w-10 h-10" />} size={96} />
+                <span className="absolute bottom-0 right-0 w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center border-2 border-background">
+                  {iconUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                </span>
+              </button>
               {editingSubject ? (
                 <div className="flex items-center gap-2 px-4 w-full">
                   <input

@@ -1062,7 +1062,15 @@ class UserSession {
         const reactionMsg = (msg.message as any)?.reactionMessage;
         if (reactionMsg?.key?.id) {
           const targetJid: string = msg.key?.remoteJid ?? reactionMsg.key.remoteJid ?? "";
-          const reactorJid: string = msg.key?.participant ?? msg.key?.remoteJid ?? "";
+          // `participant` identifies the reactor in a GROUP. For a 1:1 chat it's
+          // always undefined, so `fromMe` is the only way to tell "I reacted"
+          // apart from "they reacted" — falling back to `remoteJid` regardless
+          // (the old behaviour) mis-attributed our OWN reactions to the chat
+          // partner, which never matched the optimistic echo's `sock.user.id`
+          // and left two separate DB rows for the same physical reaction (the
+          // duplicate-pill / stuck-reaction bug).
+          const reactorJid: string =
+            msg.key?.participant ?? (msg.key?.fromMe ? this.sock?.user?.id ?? "" : msg.key?.remoteJid ?? "");
           if (targetJid && reactorJid) {
             this.notifyReaction(targetJid, reactionMsg.key.id, reactorJid, String(reactionMsg.text ?? ""), Date.now());
           }

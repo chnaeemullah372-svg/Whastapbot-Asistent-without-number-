@@ -339,7 +339,18 @@ router.get("/panel/events", async (req, res): Promise<void> => {
 router.get("/panel/calls", async (req, res): Promise<void> => {
   const user = await requirePanelUser(req, res);
   if (!user) return;
-  res.json(await getCallLogs(user.id));
+  const calls = await getCallLogs(user.id);
+  // Same @lid resolution gap as /panel/status: a caller never messaged 1:1
+  // has no cached real phone anywhere, so the log falls back to WhatsApp's
+  // opaque lid digits — resolve those live (see Round 6's resolveLidPhones).
+  const unresolved = calls.filter((c) => c.jid.endsWith("@lid") && c.phone === c.jid.split("@")[0].split(":")[0]);
+  if (unresolved.length) {
+    const resolved = await multiWA.resolveLidPhones(user.id, unresolved.map((c) => c.jid));
+    for (const c of unresolved) {
+      if (resolved[c.jid]) c.phone = resolved[c.jid];
+    }
+  }
+  res.json(calls);
 });
 
 /** Status (stories) grouped by the contact who posted them. */

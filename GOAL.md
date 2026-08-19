@@ -549,3 +549,220 @@ sent and confirmed the outgoing message renders its own "View once" badge.
   has the same raw-lid-split pattern for the *reactor's own* jid — lower
   priority since it only affects the `byMe` highlight on a self-reaction
   sent from a lid-addressed linked device, not a visible wrong number.
+
+## Round 7 — group icon upload gap, call-log avatars, and an audit of every screen not yet covered
+
+A read-only code audit (no live account touched) covering everything Round
+5/6 didn't get to: group management end-to-end, the Starred/Backup/
+Certificate/Settings/Logs/Help/Tools screens, the Calls tab, compose-time
+@mentions, and whether disappearing-message timers can be set.
+
+### Bug found and fixed: Group Info screen had no way to change the group icon, even though the backend fully supported it
+
+`routes/panel.ts` has a complete `POST /panel/groups/:jid/icon` route
+(multipart upload → `multiWA.updateGroupIcon`, which calls Baileys'
+`updateProfilePicture` and forces one avatar refetch) — but nothing in
+`groups.tsx`'s `GroupInfoScreen` ever called it. The avatar in Group Info was
+a static, non-interactive `<Avatar>` — subject and description were both
+editable (tap → pencil icon) but the icon had no equivalent affordance at
+all, unlike real WhatsApp Web where tapping the group photo opens a picker.
+
+**Fixed**: the group photo in `GroupInfoScreen` is now a button (camera-badge
+overlay, same visual language as the rest of the screen) that opens a file
+picker and uploads straight to the existing `/panel/groups/:jid/icon`
+endpoint, with an optimistic local preview (`URL.createObjectURL`) while the
+upload is in flight and an error message on failure — no backend change
+needed, this was purely a missing 40 lines of frontend wiring.
+
+### Bug found and fixed: Calls tab never showed a caller's real profile photo
+
+`wa_call_logs` has no `avatar_url` column and `getCallLogs()` selected the
+table as-is, so `CallRow` always rendered an initials circle — even for
+callers the admin has an active 1:1 chat with with a synced photo (`wa_chats.avatarUrl`),
+which the chat list, groups list, forward sheet, and starred-messages screen
+all already show correctly (Round 3, #11/#17). This is the same class of
+"avatar consistency" gap #17 was meant to close, just missed on this one
+screen.
+
+**Fixed**: `getCallLogs()` now left-joins `wa_chats` on `(userId, jid)` and
+returns `avatarUrl` alongside the existing call-log fields (same pattern
+`getStatusGroups` already uses for status posters); `WACallLog` type and
+`CallRow` in `calls.tsx` now pass it to `<Avatar url=… />`. Only helps for
+callers also present in `wa_chats` (i.e. ever messaged 1:1) — a caller never
+otherwise chatted with still falls back to initials, same limitation real
+WhatsApp Web doesn't have to deal with because it has a full phone contact
+book; not fixable here without also running `resolveLidPhones`-style live
+profile-photo fetch keyed purely off the call log's jid, which is a further,
+separate improvement if wanted.
+
+### Confirmed working, no change needed
+
+- **Group management** (`groups.tsx` `GroupInfoScreen` + `panel.ts`
+  `/panel/groups/*` + `multiWhatsapp.ts`): subject edit (`groupUpdateSubject`),
+  description edit (`groupUpdateDescription`), promote/demote/remove
+  (`groupParticipantsUpdate`), invite link get/reset
+  (`groupInviteCode`/`groupRevokeInvite`), and leave (`groupLeave`) are all
+  real Baileys calls wired end-to-end front-to-back, no dead buttons, no
+  route mismatches. `getGroupInfo`'s @lid-participant resolution (Round 6)
+  still applies correctly here.
+- **Starred messages, Backup & Restore, Certificate, Settings, Logs, Help,
+  Tools** (all 7 screens read in full): every button's API call has a real,
+  matching backend route; response shapes line up with what each screen's
+  TypeScript types expect (e.g. `SessionInfo`, `AppLog`, `BackupMeta`); no
+  stubs, no hardcoded fake data, no dead endpoints. Backup/Restore genuinely
+  round-trips `wa_chats`/`wa_messages` scoped to the requesting account with
+  a real cross-account ownership check before restoring. Tools' "Restart
+  Server" genuinely execs `pm2 restart`. Help is static FAQ content by
+  design — nothing to wire.
+- **Calls tab**: incoming/outgoing/missed icons, video-call badge, and
+  timestamps all correct and match real data. No call-back action exists —
+  this is expected, not a gap: Baileys can observe call *events* but has no
+  supported way to *place* a real WhatsApp voice/video call, so a call-back
+  button has nothing real to call. The existing on-screen note (Urdu,
+  explaining duration isn't shown because a linked device doesn't reliably
+  report it) already sets the right expectation here. Two small, non-blocking
+  polish gaps vs. real WhatsApp Web noted but not built: the list is one flat
+  feed with no "Today"/"Yesterday"/date-header grouping, and there's no way
+  to delete one call entry or clear the whole call history (only `GET
+  /panel/calls` exists — no delete route on either side, so this isn't a
+  dead-button bug, just a feature real WhatsApp Web has that this doesn't).
+
+### Confirmed still-missing (documented, not built this pass — see hard rule against building unrequested features)
+
+- **Composing an @mention**: still exactly the gap Round 3 flagged — incoming
+  mentions render as `@Name` (`multiWhatsapp.ts`'s `applyMentions`), but
+  `/panel/send` accepts no `mentionedJid` field at all and `groups.tsx`'s
+  composer has no `@`-triggered autocomplete. Unchanged since Round 3;
+  nothing regressed. One correction to how Round 3 phrased the workaround:
+  it's not just "no in-app assist" — manually typing `@923001234567` into the
+  composer and sending it will **not** render as a highlighted mention on the
+  recipient's end either, because WhatsApp's mention rendering keys off
+  `contextInfo.mentionedJid` in the protocol message, not the literal `@digits`
+  text, and neither `sendToJid()` nor `sendMessage()` in `multiWhatsapp.ts`
+  ever passes a `mentions` array to Baileys on the way out (confirmed by
+  reading both call sites — no `mentions:` field in either `sock.sendMessage`
+  call). So today there is genuinely no way, UI or manual, to send a real
+  mention from this panel — only receiving works.
+- **Setting a disappearing-messages timer**: still label-only, as Round 3/5
+  documented — the admin can see the "Disappearing" badge on a message that
+  already has one, but there is no UI or endpoint to turn the feature on for
+  a chat. Small, known, deliberately not built without an explicit ask.
+- **Add participant to a group**: WhatsApp Web's Group Info screen lets an
+  admin add a new member; this app's `/panel/groups/:jid/participants` route
+  already accepts an `"add"` action end-to-end at the engine level
+  (`groupParticipantsUpdate`), but `groups.tsx` never exposes it — there's no
+  "Add participant" button or contact picker. Not built this pass since it's
+  a genuine new feature (needs a picker UI, likely reusing `ForwardSheet`'s
+  pattern filtered to non-members) rather than a bug fix; flagging for an
+  explicit decision/ask rather than guessing scope.
+- Report/Block contact (Round 5) and true multi-account (Round 3, #16)
+  remain un-built big-lift items, unchanged.
+
+### Status
+
+- [x] Group management screen + routes + engine methods read end-to-end and
+      verified correct.
+- [x] Group icon upload: missing frontend wiring found and fixed
+      (`groups.tsx`), no backend change needed.
+- [x] Call-log avatar gap found and fixed (`chatPersistence.ts`,
+      `panelApi.ts`, `calls.tsx`).
+- [x] Starred/Backup/Certificate/Settings/Logs/Help/Tools screens audited —
+      all coherent, no dead buttons, no route mismatches found.
+- [x] Calls tab full feature check — correct as-is; no call-back button by
+      design (Baileys limitation, not a code gap).
+- [x] @mention composing re-checked — confirmed still not built (unchanged
+      from Round 3).
+- [x] Disappearing-messages timer re-checked — confirmed still label-only,
+      not settable (unchanged from Round 3/5).
+- [x] `tsc --noEmit` clean on `api-server` and `support-connect` after the
+      two fixes.
+- [ ] Add-participant UI — documented as a genuine gap, not built; needs an
+      explicit go-ahead.
+- [ ] Live verification of the group-icon upload and call-log avatars against
+      the real connected account (`+923186959638`) — not exercised live per
+      the hard rule against touching production WhatsApp sends; needs a
+      human check after deploy (open a group's info screen and change its
+      photo; open Calls and confirm a known 1:1 contact's photo now shows).
+
+## Round 8 — reaction add/remove bug + calls-tab lid gap closed, from a live browser audit
+
+A background live-browser audit (headless Chromium, confined to the
+"NATIONAL CAYBER CRIME iNVESTIGATION AGENCY" test chat per the owner's
+explicit rule — no other real chat/contact/group touched) surfaced a real
+bug in a feature Round 3 marked done: reacting to a message.
+
+### Bug found and fixed: reacting to your own message duplicated instead of toggling, and could never be removed
+
+Live evidence: reacting once showed "😮 2" (not 1), and tapping the same
+emoji again to remove it did nothing — the count stayed stuck. Two separate,
+compounding bugs:
+
+1. **Frontend never sent a removal.** `react()` in both `chats.tsx` and
+   `groups.tsx` always POSTed whatever emoji was tapped — there was no logic
+   anywhere to detect "I already reacted with this emoji, so this tap means
+   remove" and send the empty-string emoji Baileys uses for that. Tapping an
+   active reaction just re-sent the same reaction.
+2. **Two DB rows got created for one physical reaction.** `sendReaction()`
+   reflects the reaction locally right away (`myJid = this.sock.user?.id`)
+   as an optimistic update, before WhatsApp's own real echo of that reaction
+   arrives via `messages.upsert`. For a 1:1 chat, the real echo's reactor jid
+   was derived as `msg.key?.participant ?? msg.key?.remoteJid` — but
+   `participant` is only ever set in **group** messages, so for a 1:1 chat
+   this always fell through to `remoteJid`, which is the **chat partner's**
+   jid, not ours. So our own reaction's real echo got attributed to the
+   other person, under a jid that never matched the optimistic echo's
+   `sock.user.id` — `saveReaction`'s upsert key is `(userId, waMessageId,
+   reactorJid)`, so two different jid strings for "the same reaction" meant
+   two rows, hence the stuck "2". A linked-device suffix mismatch
+   (`923…:14@s.whatsapp.net` vs `923…@s.whatsapp.net`) between the two
+   representations could cause the identical symptom even when both
+   correctly meant "me".
+3. **Same malformed key on group reactions to anyone else's message.**
+   `groups.tsx`'s `react()` passed the **group's own jid** as the reaction
+   key's `participant` for any message not sent by us — WhatsApp's protocol
+   needs the target message's actual *sender* there to identify which
+   group member's message is being reacted to. `WAMessage` also never
+   exposed the `participant` column at all (`getChatMessagesDb` didn't
+   select it, despite the DB column existing since message persistence was
+   built), so there was no correct value even available to use.
+
+**Fixed**: `react()` in both chat views now checks `msg.reactions` for an
+existing `byMe` entry with the same emoji and sends `""` to remove instead
+of re-sending; the 1:1 reactor-jid fallback in `multiWhatsapp.ts` now uses
+`msg.key.fromMe` to correctly attribute a self-reaction to ourselves instead
+of the chat partner; the reaction-persistence listener
+(`chatPersistence.ts`) strips a linked-device suffix (`:14` etc.) before
+persisting so format differences between the optimistic and real echo can
+no longer create a duplicate row; `getChatMessagesDb` now selects
+`participant` and it's exposed on `WAMessage`, and `groups.tsx` passes the
+real sender's jid instead of the group's. Verified live end-to-end in the
+test chat: add → count 1 (was 2), remove → empty (was stuck) — see the
+message with `waMessageId 3EB0ED1A2B71D0E0B1DE29`. One stray leftover
+duplicate-reaction row from the audit agent's testing was cleaned up
+directly in the DB (harmless, test-chat-only).
+
+### Bug found and fixed: Calls tab still showed opaque @lid digits for a caller never messaged 1:1
+
+Round 6 fixed this for Status and Group participants but missed Calls —
+`/panel/calls` returned whatever `getCallLogs()` had cached, with no
+live-resolution fallback for a caller with no `wa_chats` row at all (the
+same class of gap Round 7 separately found for that tab's *avatars*).
+Live evidence: one real call entry showed `+164502146392126` (15 digits,
+not a valid number) instead of a name or real number.
+
+**Fixed**: `/panel/calls` now runs the same `resolveLidPhones()` pass
+`/panel/status` already does — live signalRepository lookup for any call
+whose phone still looks like raw lid digits. Verified live: that exact
+entry now resolves to `+923471863910`.
+
+### Status
+
+- [x] Reaction add/remove: fixed and verified live (add → 1, remove → 0,
+      confirmed via direct message inspection, not just UI).
+- [x] Group reactions on others' messages: correct sender jid now available
+      and used (not live-verified against a real group member's reaction —
+      only the test chat, a 1:1, could be safely exercised live).
+- [x] Calls tab lid-number gap: fixed and verified live against the exact
+      entry the audit flagged.
+- [x] `tsc --noEmit` clean on `api-server` and `support-connect`.
+- [x] Built and deployed — both PM2 processes restarted clean, no crash.

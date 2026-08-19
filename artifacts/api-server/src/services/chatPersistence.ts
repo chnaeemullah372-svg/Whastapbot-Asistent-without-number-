@@ -524,6 +524,7 @@ export async function getChatMessagesDb(userId: number, jid: string) {
       mediaKind: waMessagesTable.mediaKind,
       fileName: waMessagesTable.fileName,
       hasMedia: sql<boolean>`(${waMessagesTable.media} IS NOT NULL)`,
+      participant: waMessagesTable.participant,
       starred: waMessagesTable.starred,
       edited: waMessagesTable.edited,
       viewOnce: waMessagesTable.viewOnce,
@@ -701,14 +702,18 @@ export async function saveCallLog(userId: number, call: WACall) {
   }
 }
 
-/** Recent call log for one account, newest first. */
+/** Recent call log for one account, newest first. Left-joins wa_chats (by jid)
+ *  so a caller we've also messaged directly shows their real profile photo,
+ *  same as the chat list and status screens, instead of always an initial. */
 export async function getCallLogs(userId: number, limit = 200) {
-  return db
-    .select()
+  const rows = await db
+    .select({ call: waCallLogsTable, avatarUrl: waChatsTable.avatarUrl })
     .from(waCallLogsTable)
+    .leftJoin(waChatsTable, and(eq(waChatsTable.userId, waCallLogsTable.userId), eq(waChatsTable.jid, waCallLogsTable.jid)))
     .where(eq(waCallLogsTable.userId, userId))
     .orderBy(desc(waCallLogsTable.ts))
     .limit(limit);
+  return rows.map((r) => ({ ...r.call, avatarUrl: r.avatarUrl ?? null }));
 }
 
 /** Status (stories) grouped by the contact who posted them, for one account.
@@ -848,9 +853,16 @@ export async function startPersistence() {
   multiWA.addDeleteListener((uid, waMessageId) => {
     void markDeleted(uid, waMessageId);
   });
-  // Emoji reactions (add or, with an empty emoji, remove).
+  // Emoji reactions (add or, with an empty emoji, remove). Strip a linked
+  // device suffix (":14" in "923...:14@s.whatsapp.net") before persisting —
+  // the optimistic local echo (sent right after we react) and WhatsApp's own
+  // real echo of the same reaction don't always carry the same device
+  // suffix, and saveReaction's unique key is the raw jid string, so an
+  // unnormalized mismatch here created two DB rows for one physical reaction
+  // (visible as a stuck count and a reaction that couldn't be removed).
   multiWA.addReactionListener((uid, _jid, waMessageId, reactorJid, emoji, ts) => {
-    void saveReaction(uid, waMessageId, reactorJid, emoji, ts);
+    const normalizedJid = reactorJid.replace(/:\d+(?=@)/, "");
+    void saveReaction(uid, waMessageId, normalizedJid, emoji, ts);
   });
   // Calls log: persist every call notification (incoming / missed / rejected).
   multiWA.addCallListener((uid, call) => {

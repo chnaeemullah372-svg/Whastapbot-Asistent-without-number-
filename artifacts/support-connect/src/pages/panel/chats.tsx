@@ -679,9 +679,14 @@ function Conversation({
 
   async function react(msg: WAMessage, emoji: string) {
     setMenuFor(null);
+    // WhatsApp-style toggle: tapping the emoji you've already reacted with
+    // removes it (empty text = remove, same protocol Baileys uses); tapping
+    // a different one replaces it. Without this check every tap just re-sent
+    // the same reaction and there was no way to ever remove one.
+    const alreadyReacted = msg.reactions?.some((r) => r.emoji === emoji && r.byMe);
     try {
       await panel.post(`/panel/chats/${encodeURIComponent(jid)}/${encodeURIComponent(msg.waMessageId)}/react`, {
-        emoji, fromMe: msg.fromMe,
+        emoji: alreadyReacted ? "" : emoji, fromMe: msg.fromMe,
       });
       load();
     } catch {}
