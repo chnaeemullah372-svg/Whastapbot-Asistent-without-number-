@@ -205,6 +205,7 @@ export interface GroupParticipant {
   jid: string;
   admin: "admin" | "superadmin" | null;
   name?: string;
+  phone?: string;
 }
 
 export interface GroupInfo {

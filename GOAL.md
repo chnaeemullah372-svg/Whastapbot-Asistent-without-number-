@@ -459,3 +459,93 @@ verified end-to-end against the live API (mark unread/read, delete/restore).
       build.
 - [ ] Report/Block contact — needs an owner decision (see above), not built.
 - [ ] `UND_ERR_SOCKET` crash-loop — noted, not fixed in this pass.
+
+## Round 6 — live message-action testing on Chromium + @lid number bugs (Groups/Status/Calls)
+
+Owner asked for a real, in-browser walkthrough (not just API checks): send a
+message in the first chat, exercise every message-level 3-dot action
+(reactions/reply/star/forward/delete-for-me/delete-for-everyone/view-once),
+and separately check why Groups and Status were showing wrong numbers.
+Driven live via headless Chromium (Playwright) against `hatelecom.xyz`,
+logged in as `admin`, on the real connected account (`+923186959638`) — the
+owner was actively on the other end of the test chat in real time and
+independently confirmed both the bug and the fix (see below).
+
+### Critical bug found and fixed: quoted replies sent from the panel never carried the quote
+
+Clicking **Reply** on a message, typing an answer, and sending produced a
+perfectly normal, **unquoted** message — `replyTo` was silently never being
+set. Root cause: the per-message action menu (`chats.tsx`) is nested inside
+the same bubble `<div>` that runs the swipe-to-reply gesture, which calls
+`setPointerCapture()` on `pointerdown`. Because nothing in the menu stopped
+event propagation, every tap inside it (Reply, Star, Forward, Delete…)
+bubbled up into that bubble's own click/pointer handlers, and the resulting
+interference meant `setReplyTo(m)` never stuck. This is the same "mention
+message نہیں آیا" (quote didn't come through) the owner had already noticed
+live — confirmed independently from the real recipient's phone while
+testing, and confirmed fixed the same way afterward (`quotedText` correctly
+attached in the DB row, and the recipient's own reply quoted it back). Fix:
+`e.stopPropagation()` on the menu's `onClick`/`onPointerDown` in both
+`chats.tsx` and `groups.tsx` (groups doesn't use pointer-capture but the
+same nesting risk existed there too).
+
+### Bug found and fixed: Groups and Status showed WhatsApp's opaque @lid digits instead of real phone numbers
+
+Same root cause in three places — a poster/participant's `@lid` jid (an
+opaque per-app privacy id, *not* a phone number) was being digit-split
+directly instead of resolved to the real number:
+
+- `getStatusGroups` (`chatPersistence.ts`) recomputed a status poster's
+  phone from the raw participant jid instead of using the already-resolved
+  real phone sitting right there in `wa_chats` for anyone we've ever
+  chatted with directly.
+- `getGroupInfo` (`multiWhatsapp.ts`) did the same for group participants —
+  worse here, since most group members were never messaged 1:1, so there
+  was no cached phone at all for the vast majority (557/557 participants in
+  one sampled group all showed wrong numbers before the fix).
+- `handleCall`'s call-log phone (same file) had the identical bug for the
+  Calls tab.
+
+**Fixed**: `getStatusGroups` now prefers `wa_chats.phone` (keyed by jid)
+over the raw split. For posters/participants with **no** chat history at
+all (the common case for group members), added `resolveLidPhones()` — a
+live, read-only `sock.signalRepository.lidMapping.getPNForLID()` lookup
+(the same primitive `ensureRealPhone` already used for regular chats) — and
+wired it into both `/panel/status` and `getGroupInfo`. Verified live: every
+one of 29 status posters and all 557 participants in a sampled group now
+show a correct `92xxxxxxxxx`-format number instead of 15-digit lid noise.
+Calls got the cheap half (prefer the cached chat phone) without the live
+lookup, since it wasn't the reported bug.
+
+### Feature added: sending a photo/video as "View once"
+
+Round 3 only handled *receiving* view-once media (label + anti-delete
+save); there was no way to *send* one from the panel. Added: Baileys'
+`viewOnce: true` on `sendMessage`'s image/video content
+(`multiWhatsapp.ts`), a `viewOnce` field threaded through
+`/panel/send-media`, and a WhatsApp-style pre-send preview screen in
+`chats.tsx` (photo/video preview + caption + a "View once" toggle pill)
+replacing the old fire-and-forget-on-pick behavior for images/videos only
+(voice notes/documents still send immediately, unchanged). Verified live —
+sent and confirmed the outgoing message renders its own "View once" badge.
+
+### Confirmed working live (no change needed)
+
+- Delete for everyone: revokes on WhatsApp and immediately shows the red
+  "Deleted for everyone" label while keeping the original content visible
+  (anti-delete design working as intended) — verified via direct delete +
+  via the fixed UI button.
+- Reactions, Star, Forward, Delete for me — menu renders and is wired
+  correctly (verified visually; not each individually round-tripped this
+  pass since none showed the reply-style symptom).
+
+### Not chased this pass (flagged, not silent)
+
+- The owner reported messages arriving slow ("*msg slow aty jaty han*")
+  during live testing — no root cause investigated yet; worth a dedicated
+  pass (check Baileys event-loop pressure / the existing `UND_ERR_SOCKET`
+  crash-loop above as a possible related cause) rather than a guess here.
+- Reaction "by me" detection (`chatPersistence.ts`'s `getChatMessagesDb`)
+  has the same raw-lid-split pattern for the *reactor's own* jid — lower
+  priority since it only affects the `byMe` highlight on a self-reaction
+  sent from a lid-addressed linked device, not a visible wrong number.

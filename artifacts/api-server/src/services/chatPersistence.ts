@@ -740,6 +740,12 @@ export async function getStatusGroups(userId: number) {
   const nameByPhone = new Map<string, string | null>(chats.map((c: any) => [c.phone, c.name]));
   const avatarByJid = new Map<string, string | null>(chats.map((c: any) => [c.jid, c.avatarUrl]));
   const avatarByPhone = new Map<string, string | null>(chats.map((c: any) => [c.phone, c.avatarUrl]));
+  // A status poster's participant jid is often a @lid (WhatsApp's opaque
+  // privacy-addressing id) that carries no real digits at all. If we've ever
+  // chatted with them directly, their real phone was already resolved onto
+  // their wa_chats row (see multiWhatsapp's ensureRealPhone) — prefer that
+  // over re-deriving the raw (meaningless, for @lid) digits from the jid.
+  const phoneByJid = new Map<string, string>(chats.map((c: any) => [c.jid, c.phone]));
 
   type StatusItem = {
     waMessageId: string;
@@ -767,7 +773,8 @@ export async function getStatusGroups(userId: number) {
     // what the viewer can actually show; groups left empty are never created.
     if (r.deleted) continue;
     const pj = r.participant ?? "unknown";
-    const phone = pj.includes("@") ? pj.split("@")[0].split(":")[0] : "";
+    const rawPhone = pj.includes("@") ? pj.split("@")[0].split(":")[0] : "";
+    const phone = phoneByJid.get(pj) ?? rawPhone;
     let g = groups.get(pj);
     if (!g) {
       const name =

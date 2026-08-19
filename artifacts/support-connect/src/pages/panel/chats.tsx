@@ -9,7 +9,7 @@ import {
 import {
   Search, Send, ChevronLeft, Check, CheckCheck, Trash2,
   MessageSquarePlus, X, Loader2, MoreVertical, Circle, Reply, Star,
-  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic, Copy,
+  Paperclip, Pin, BellOff, Archive, Forward, CircleDashed, Timer, Mic, Copy, Eye,
 } from "lucide-react";
 
 const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
@@ -415,6 +415,8 @@ function Conversation({
   const recordChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sendError, setSendError] = useState("");
+  const [pendingMedia, setPendingMedia] = useState<{ file: File; kind: string; previewUrl: string } | null>(null);
+  const [pendingViewOnce, setPendingViewOnce] = useState(false);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<WAMessage | null>(null);
   const [forwardFor, setForwardFor] = useState<WAMessage | null>(null);
@@ -536,13 +538,24 @@ function Conversation({
     const kind = file.type.startsWith("image/") ? "image"
       : file.type.startsWith("video/") ? "video"
       : file.type.startsWith("audio/") ? "audio" : "document";
+    // Photos/videos get a WhatsApp-style preview step (caption + "view once"
+    // toggle) before sending; voice notes/documents send immediately as before.
+    if (kind === "image" || kind === "video") {
+      setPendingMedia({ file, kind, previewUrl: URL.createObjectURL(file) });
+      return;
+    }
+    await sendMediaFile(file, kind);
+  }
+
+  async function sendMediaFile(file: File | Blob, kind: string, viewOnce = false) {
     setSending(true);
     setSendError("");
     const form = new FormData();
-    form.append("file", file);
+    form.append("file", file, file instanceof File ? file.name : "voice-note.webm");
     form.append("jid", jid);
     form.append("kind", kind);
     if (text.trim()) form.append("caption", text.trim());
+    if (viewOnce) form.append("viewOnce", "true");
     if (replyTo) {
       form.append("quotedId", replyTo.waMessageId);
       form.append("quotedFromMe", String(replyTo.fromMe));
@@ -552,6 +565,8 @@ function Conversation({
       await panel.postForm("/panel/send-media", form);
       setText("");
       setReplyTo(null);
+      setPendingMedia(null);
+      setPendingViewOnce(false);
       load();
     } catch (err: any) {
       setSendError(err?.message || "Failed to send file");
@@ -976,7 +991,17 @@ function Conversation({
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]">
+                <div
+                  // The bubble underneath captures the pointer for swipe-to-reply
+                  // (setPointerCapture on pointerdown) and re-toggles this same menu
+                  // on click — without stopping propagation here, every tap inside
+                  // this popup (Reply included) bubbled up into that handler chain
+                  // and the action never actually applied (e.g. Reply never set
+                  // replyTo, so a "quoted" send silently went out unquoted).
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]"
+                >
                   <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
                     {QUICK_EMOJIS.map((em) => (
                       <button key={em} onClick={() => react(m, em)} className="text-lg hover:scale-125 transition p-0.5">{em}</button>
@@ -1111,6 +1136,46 @@ function Conversation({
 
       {(forwardFor || bulkForward) && (
         <ForwardSheet chats={allChats} onClose={() => { setForwardFor(null); setBulkForward(false); }} onPick={forwardTo} />
+      )}
+
+      {pendingMedia && (
+        <div className="fixed inset-0 z-40 flex flex-col bg-black max-w-md mx-auto">
+          <div className="flex items-center justify-between p-3">
+            <button onClick={() => { URL.revokeObjectURL(pendingMedia.previewUrl); setPendingMedia(null); setPendingViewOnce(false); }} aria-label="Cancel">
+              <X className="w-5 h-5 text-white" />
+            </button>
+            <button
+              onClick={() => setPendingViewOnce((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${pendingViewOnce ? "bg-primary text-primary-foreground" : "bg-white/10 text-white"}`}
+              aria-label="Toggle view once"
+            >
+              <Eye className="w-4 h-4" /> View once
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center overflow-hidden">
+            {pendingMedia.kind === "image" ? (
+              <img src={pendingMedia.previewUrl} alt="" className="max-w-full max-h-full object-contain" />
+            ) : (
+              <video src={pendingMedia.previewUrl} controls className="max-w-full max-h-full" />
+            )}
+          </div>
+          <div className="flex items-center gap-2 p-3">
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Add a caption"
+              className="flex-1 rounded-full bg-white/10 text-white placeholder-white/50 px-4 py-2.5 text-sm outline-none"
+            />
+            <button
+              onClick={() => sendMediaFile(pendingMedia.file, pendingMedia.kind, pendingViewOnce)}
+              disabled={sending}
+              className="w-11 h-11 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 disabled:opacity-50 active:scale-95 transition"
+              aria-label="Send"
+            >
+              {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

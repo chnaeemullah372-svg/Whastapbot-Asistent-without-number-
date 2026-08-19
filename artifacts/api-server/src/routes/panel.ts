@@ -346,7 +346,19 @@ router.get("/panel/calls", async (req, res): Promise<void> => {
 router.get("/panel/status", async (req, res): Promise<void> => {
   const user = await requirePanelUser(req, res);
   if (!user) return;
-  res.json(await getStatusGroups(user.id));
+  const groups = await getStatusGroups(user.id);
+  // A poster we've never chatted with has no wa_chats row to resolve their
+  // @lid from, so getStatusGroups falls back to the opaque lid digits — try
+  // a live resolution for exactly those (cheap local Signal-store lookup,
+  // not a network round trip) so the admin still sees a real number.
+  const unresolved = groups.filter((g) => g.participant.endsWith("@lid") && g.phone === g.participant.split("@")[0].split(":")[0]);
+  if (unresolved.length) {
+    const resolved = await multiWA.resolveLidPhones(user.id, unresolved.map((g) => g.participant));
+    for (const g of unresolved) {
+      if (resolved[g.participant]) g.phone = resolved[g.participant];
+    }
+  }
+  res.json(groups);
 });
 
 router.get("/panel/chats/:jid/messages", async (req, res): Promise<void> => {
@@ -577,6 +589,7 @@ router.post("/panel/send-media", uploadMedia.single("file"), async (req, res): P
     const waMessageId = await multiWA.sendMedia(user.id, targetJid, file.buffer, file.mimetype, kind, {
       caption: req.body?.caption ? String(req.body.caption) : undefined,
       fileName: file.originalname,
+      viewOnce: req.body?.viewOnce === true || req.body?.viewOnce === "true",
       quoted,
     });
     res.json({ success: true, waMessageId });

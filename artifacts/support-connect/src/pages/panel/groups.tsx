@@ -510,7 +510,10 @@ function GroupConversation({
                 )}
               </span>
               {menuFor === m.waMessageId && (
-                <div className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]">
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute -top-2 right-0 translate-y-[-100%] flex flex-col bg-popover border border-border rounded-lg shadow-lg z-10 overflow-hidden min-w-[170px]"
+                >
                   <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
                     {QUICK_EMOJIS.map((em) => (
                       <button key={em} onClick={() => react(m, em)} className="text-lg hover:scale-125 transition p-0.5">{em}</button>
@@ -877,7 +880,7 @@ function GroupInfoScreen({ jid, chat, onClose, onLeft }: { jid: string; chat?: W
               </p>
               {info.participants.map((p) => {
                 const isAdmin = p.admin === "admin" || p.admin === "superadmin";
-                const label = p.name || `+${p.jid.split("@")[0].split(":")[0]}`;
+                const label = p.name || (p.phone ? `+${p.phone}` : p.jid);
                 return (
                   <div key={p.jid} className="relative flex items-center gap-3 py-2 border-b border-border/40 last:border-b-0">
                     <Avatar label={label} size={40} />

@@ -279,13 +279,17 @@ class UserSession {
       case "accept": outcome = "accepted"; break;
       default: outcome = "unknown";
     }
+    const counterpartEntry = this.chatStore.get(counterpartJid);
     const name =
-      this.chatStore.get(counterpartJid)?.meta.name ??
+      counterpartEntry?.meta.name ??
       this.chatStore.get(`${phone}@s.whatsapp.net`)?.meta.name ??
       undefined;
+    // counterpartJid is often an opaque @lid with no real digits — prefer
+    // whatever real phone we've already resolved for them from a direct chat.
+    const resolvedPhone = counterpartEntry?.meta.phone ?? phone;
     const ts = c?.date ? new Date(c.date).getTime() : Date.now();
     this.notifyCall({
-      callId, jid: counterpartJid, phone, name,
+      callId, jid: counterpartJid, phone: resolvedPhone, name,
       isVideo: !!c?.isVideo, isGroup: !!c?.isGroup, outgoing, rawStatus, outcome, ts,
     });
   }
@@ -396,7 +400,7 @@ class UserSession {
     buffer: Buffer,
     mimeType: string,
     kind: "image" | "video" | "audio" | "document",
-    opts: { caption?: string; fileName?: string; quoted?: { waMessageId: string; fromMe: boolean; text: string } } = {},
+    opts: { caption?: string; fileName?: string; viewOnce?: boolean; quoted?: { waMessageId: string; fromMe: boolean; text: string } } = {},
   ): Promise<string> {
     if (!this.sock || this.state.status !== "connected") throw new Error("Not connected");
     let quotedOpt: any = undefined;
@@ -408,9 +412,11 @@ class UserSession {
         },
       };
     }
+    // View-once is only a real WhatsApp concept for photos/videos.
+    const viewOnce = opts.viewOnce && (kind === "image" || kind === "video") ? true : undefined;
     let content: any;
-    if (kind === "image") content = { image: buffer, caption: opts.caption, mimetype: mimeType };
-    else if (kind === "video") content = { video: buffer, caption: opts.caption, mimetype: mimeType };
+    if (kind === "image") content = { image: buffer, caption: opts.caption, mimetype: mimeType, viewOnce };
+    else if (kind === "video") content = { video: buffer, caption: opts.caption, mimetype: mimeType, viewOnce };
     else if (kind === "audio") content = { audio: buffer, mimetype: mimeType, ptt: true };
     else content = { document: buffer, mimetype: mimeType, fileName: opts.fileName || "file" };
 
@@ -426,7 +432,7 @@ class UserSession {
       {
         id: msgId, text: display, fromMe: true, ts: Date.now(), status: 1,
         media: buffer.length <= MEDIA_MAX_BYTES ? buffer.toString("base64") : undefined,
-        mediaMime: mimeType, mediaKind: kind, fileName: opts.fileName,
+        mediaMime: mimeType, mediaKind: kind, fileName: opts.fileName, viewOnce,
         quotedText: opts.quoted?.text, quotedId: opts.quoted?.waMessageId,
       },
       display,
@@ -439,16 +445,29 @@ class UserSession {
   async getGroupInfo(jid: string) {
     if (!this.sock) throw new Error("Not connected");
     const meta: any = await this.sock.groupMetadata(jid);
+    const participants: any[] = meta.participants ?? [];
+    // Most group members were never messaged 1:1, so their jid is often an
+    // opaque @lid with no real digits at all and no chatStore entry to read
+    // a resolved phone from — resolve those live (see resolveLidPhones).
+    const lidsToResolve = participants
+      .map((p) => p.id as string)
+      .filter((pid) => pid.endsWith("@lid") && !this.chatStore.get(pid)?.meta.phone);
+    const resolved = lidsToResolve.length ? await this.resolveLidPhones(lidsToResolve) : {};
     return {
       id: meta.id as string,
       subject: meta.subject as string,
       description: (meta.desc as string) ?? null,
       owner: (meta.owner as string) ?? null,
-      participants: (meta.participants ?? []).map((p: any) => ({
-        jid: p.id as string,
-        admin: (p.admin as string | null) ?? null, // "admin" | "superadmin" | null
-        name: this.chatStore.get(p.id)?.meta.name ?? undefined,
-      })),
+      participants: participants.map((p) => {
+        const entry = this.chatStore.get(p.id);
+        const phone = entry?.meta.phone ?? resolved[p.id] ?? (String(p.id).includes("@") ? String(p.id).split("@")[0].split(":")[0] : String(p.id));
+        return {
+          jid: p.id as string,
+          admin: (p.admin as string | null) ?? null, // "admin" | "superadmin" | null
+          name: entry?.meta.name ?? undefined,
+          phone,
+        };
+      }),
     };
   }
 
@@ -566,6 +585,23 @@ class UserSession {
         }
       })
       .catch(() => { this.lidPhoneFetched.delete(jid); });
+  }
+
+  /** Live, read-only resolution of `@lid` jids to real phone numbers — for
+   *  status posters we've never chatted with, so no cached wa_chats phone
+   *  exists yet (unlike ensureRealPhone, this never touches chatStore/
+   *  persistence, it just answers the question for the caller). */
+  async resolveLidPhones(lids: string[]): Promise<Record<string, string>> {
+    const sock = this.sock;
+    if (!sock) return {};
+    const out: Record<string, string> = {};
+    await Promise.all(lids.map(async (lid) => {
+      try {
+        const pn = await sock.signalRepository.lidMapping.getPNForLID(lid);
+        if (pn) out[lid] = pn.split(":")[0].split("@")[0];
+      } catch {}
+    }));
+    return out;
   }
 
   /** Apply a resolved display name to a chat, honouring the tier system so a
@@ -1341,6 +1377,7 @@ class MultiWhatsAppService {
 
   getState(userId: number): UserWAState { return this.getSession(userId).state; }
   getSessionInfo(userId: number) { return this.getSession(userId).getSessionInfo(); }
+  resolveLidPhones(userId: number, lids: string[]) { return this.getSession(userId).resolveLidPhones(lids); }
   getAllStates(): UserWAState[] { return [...this.sessions.values()].map(s => s.state); }
   addUserListener(userId: number, fn: (state: UserWAState) => void) { return this.getSession(userId).addListener(fn); }
 
@@ -1365,7 +1402,7 @@ class MultiWhatsAppService {
   }
   sendMedia(
     userId: number, jid: string, buffer: Buffer, mimeType: string, kind: "image" | "video" | "audio" | "document",
-    opts?: { caption?: string; fileName?: string; quoted?: { waMessageId: string; fromMe: boolean; text: string } },
+    opts?: { caption?: string; fileName?: string; viewOnce?: boolean; quoted?: { waMessageId: string; fromMe: boolean; text: string } },
   ) {
     return this.getSession(userId).sendMedia(jid, buffer, mimeType, kind, opts);
   }
